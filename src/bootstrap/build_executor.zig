@@ -26,7 +26,7 @@ pub fn executeBuildGraph(
                 const zig_exe = try requireZigExecutable(allocator, options.toolchain_root, &zig_exe_path);
                 try executeZigLink(allocator, workspace_cwd, zig_exe, link, options.max_output_bytes);
             },
-            .archive_pack => return error.OperatorExecutionFailed,
+            .archive_pack => |pack| try executeArchivePack(allocator, workspace_cwd, pack),
         }
     }
 }
@@ -109,6 +109,58 @@ fn executeZigLink(
     try argv.append(allocator, link.out_path);
 
     try runCommand(allocator, workspace_cwd, argv.items, max_output_bytes);
+}
+
+fn executeArchivePack(
+    allocator: std.mem.Allocator,
+    workspace_cwd: []const u8,
+    pack: validator.ArchivePackOp,
+) !void {
+    const out_abs = try std.fs.path.join(allocator, &.{ workspace_cwd, pack.out_path });
+    defer allocator.free(out_abs);
+    if (std.fs.path.dirname(out_abs)) |parent| {
+        try std.fs.cwd().makePath(parent);
+    }
+
+    if (try pathExists(out_abs)) {
+        std.fs.cwd().deleteFile(out_abs) catch |err| switch (err) {
+            error.IsDir => return error.OperatorExecutionFailed,
+            else => return err,
+        };
+    }
+
+    var out_file = std.fs.cwd().createFile(out_abs, .{}) catch |err| switch (err) {
+        error.IsDir, error.FileNotFound, error.NotDir => return error.OperatorExecutionFailed,
+        else => return err,
+    };
+    defer out_file.close();
+
+    var out_buffer: [64 * 1024]u8 = undefined;
+    var out_writer = out_file.writer(&out_buffer);
+    var tar_writer: std.tar.Writer = .{ .underlying_writer = &out_writer.interface };
+
+    for (pack.input_paths) |input_path| {
+        const input_abs = try std.fs.path.join(allocator, &.{ workspace_cwd, input_path });
+        defer allocator.free(input_abs);
+
+        var in_file = std.fs.cwd().openFile(input_abs, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.IsDir => return error.OperatorExecutionFailed,
+            else => return err,
+        };
+        defer in_file.close();
+
+        const stat = in_file.stat() catch return error.OperatorExecutionFailed;
+        if (stat.kind != .file) return error.OperatorExecutionFailed;
+
+        var in_buffer: [32 * 1024]u8 = undefined;
+        var in_reader = in_file.reader(&in_buffer);
+        tar_writer.writeFileStream(input_path, stat.size, &in_reader.interface, .{
+            .mode = 0o644,
+            .mtime = 1,
+        }) catch return error.OperatorExecutionFailed;
+    }
+
+    try out_writer.interface.flush();
 }
 
 fn runCommand(
@@ -235,4 +287,61 @@ test "executeBuildGraph reports missing toolchain for c.compile" {
         error.ToolchainNotFound,
         executeBuildGraph(allocator, ".", &build_spec, .{}),
     );
+}
+
+test "executeBuildGraph packs archive in workspace" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("workspace/obj");
+    try tmp.dir.writeFile(.{
+        .sub_path = "workspace/obj/a.o",
+        .data = "obj-a\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "workspace/obj/b.o",
+        .data = "obj-b\n",
+    });
+
+    const workspace_cwd = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/workspace", .{tmp.sub_path[0..]});
+    defer allocator.free(workspace_cwd);
+
+    var inputs = try allocator.alloc([]u8, 2);
+    inputs[0] = try allocator.dupe(u8, "obj/a.o");
+    inputs[1] = try allocator.dupe(u8, "obj/b.o");
+
+    var ops = try allocator.alloc(validator.BuildOp, 1);
+    ops[0] = .{
+        .archive_pack = .{
+            .input_paths = inputs,
+            .out_path = try allocator.dupe(u8, "kilnexus-out/objects.tar"),
+        },
+    };
+    var build_spec: validator.BuildSpec = .{ .ops = ops };
+    defer build_spec.deinit(allocator);
+
+    try executeBuildGraph(allocator, workspace_cwd, &build_spec, .{});
+
+    const archive_path = try std.fs.path.join(allocator, &.{ workspace_cwd, "kilnexus-out/objects.tar" });
+    defer allocator.free(archive_path);
+    var archive_file = try std.fs.cwd().openFile(archive_path, .{});
+    defer archive_file.close();
+
+    var read_buffer: [64 * 1024]u8 = undefined;
+    var file_reader = archive_file.reader(&read_buffer);
+    var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(&file_reader.interface, .{
+        .file_name_buffer = &file_name_buffer,
+        .link_name_buffer = &link_name_buffer,
+    });
+
+    const entry1 = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry1.kind == .file);
+    try std.testing.expectEqualStrings("obj/a.o", entry1.name);
+
+    const entry2 = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry2.kind == .file);
+    try std.testing.expectEqualStrings("obj/b.o", entry2.name);
 }

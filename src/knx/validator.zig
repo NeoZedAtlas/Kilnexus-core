@@ -121,18 +121,30 @@ pub const ZigLinkOp = struct {
     }
 };
 
+pub const ArchivePackOp = struct {
+    input_paths: [][]u8,
+    out_path: []u8,
+
+    pub fn deinit(self: *ArchivePackOp, allocator: std.mem.Allocator) void {
+        for (self.input_paths) |path| allocator.free(path);
+        allocator.free(self.input_paths);
+        allocator.free(self.out_path);
+        self.* = undefined;
+    }
+};
+
 pub const BuildOp = union(enum) {
     fs_copy: FsCopyOp,
     c_compile: CCompileOp,
     zig_link: ZigLinkOp,
-    archive_pack,
+    archive_pack: ArchivePackOp,
 
     pub fn deinit(self: *BuildOp, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .fs_copy => |*copy| copy.deinit(allocator),
             .c_compile => |*compile| compile.deinit(allocator),
             .zig_link => |*link| link.deinit(allocator),
-            else => {},
+            .archive_pack => |*pack| pack.deinit(allocator),
         }
         self.* = undefined;
     }
@@ -410,7 +422,37 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
             continue;
         }
         if (std.mem.eql(u8, op_name, "knx.archive.pack")) {
-            try ops.append(allocator, .archive_pack);
+            const out_text = try expectNonEmptyString(obj, "out");
+            try validateWorkspaceRelativePath(out_text);
+            const inputs = try expectArrayField(obj, "inputs");
+            if (inputs.items.len == 0) return error.ValueInvalid;
+
+            var input_paths_list: std.ArrayList([]u8) = .empty;
+            errdefer {
+                for (input_paths_list.items) |path| allocator.free(path);
+                input_paths_list.deinit(allocator);
+            }
+            for (inputs.items) |input_value| {
+                const input_text = try expectString(input_value, "archive input path");
+                if (input_text.len == 0) return error.ValueInvalid;
+                try validateWorkspaceRelativePath(input_text);
+                try input_paths_list.append(allocator, try allocator.dupe(u8, input_text));
+            }
+            const input_paths = try input_paths_list.toOwnedSlice(allocator);
+            errdefer {
+                for (input_paths) |path| allocator.free(path);
+                allocator.free(input_paths);
+            }
+
+            const out_path = try allocator.dupe(u8, out_text);
+            errdefer allocator.free(out_path);
+
+            try ops.append(allocator, .{
+                .archive_pack = .{
+                    .input_paths = input_paths,
+                    .out_path = out_path,
+                },
+            });
             continue;
         }
         return error.OperatorNotAllowed;
@@ -1068,4 +1110,53 @@ test "parseBuildSpec rejects disallowed compile arg" {
     ;
 
     try std.testing.expectError(error.ValueInvalid, parseBuildSpec(allocator, json));
+}
+
+test "parseBuildSpec parses archive.pack operation" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    {
+        \\      "op": "knx.archive.pack",
+        \\      "inputs": ["obj/a.o", "obj/b.o"],
+        \\      "out": "kilnexus-out/objects.tar"
+        \\    }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/objects.tar", "mode": "0644" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseBuildSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), spec.ops.len);
+    switch (spec.ops[0]) {
+        .archive_pack => |pack| {
+            try std.testing.expectEqual(@as(usize, 2), pack.input_paths.len);
+            try std.testing.expectEqualStrings("obj/a.o", pack.input_paths[0]);
+            try std.testing.expectEqualStrings("obj/b.o", pack.input_paths[1]);
+            try std.testing.expectEqualStrings("kilnexus-out/objects.tar", pack.out_path);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
