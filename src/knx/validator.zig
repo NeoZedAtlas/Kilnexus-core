@@ -81,6 +81,42 @@ pub const OutputSpec = struct {
     }
 };
 
+pub const FsCopyOp = struct {
+    from_path: []u8,
+    to_path: []u8,
+
+    pub fn deinit(self: *FsCopyOp, allocator: std.mem.Allocator) void {
+        allocator.free(self.from_path);
+        allocator.free(self.to_path);
+        self.* = undefined;
+    }
+};
+
+pub const BuildOp = union(enum) {
+    fs_copy: FsCopyOp,
+    c_compile,
+    zig_link,
+    archive_pack,
+
+    pub fn deinit(self: *BuildOp, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .fs_copy => |*copy| copy.deinit(allocator),
+            else => {},
+        }
+        self.* = undefined;
+    }
+};
+
+pub const BuildSpec = struct {
+    ops: []BuildOp,
+
+    pub fn deinit(self: *BuildSpec, allocator: std.mem.Allocator) void {
+        for (self.ops) |*op| op.deinit(allocator);
+        allocator.free(self.ops);
+        self.* = undefined;
+    }
+};
+
 pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []const u8) !ValidationSummary {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
     defer parsed.deinit();
@@ -240,6 +276,72 @@ pub fn parseOutputSpecStrict(allocator: std.mem.Allocator, canonical_json: []con
     return parseOutputSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
 }
 
+pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) !BuildSpec {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
+    defer parsed.deinit();
+
+    const root = try expectObject(parsed.value, "root");
+    const build_value = root.get("build") orelse {
+        return .{
+            .ops = try allocator.alloc(BuildOp, 0),
+        };
+    };
+    const build_array = try expectArray(build_value, "build");
+
+    var ops: std.ArrayList(BuildOp) = .empty;
+    errdefer {
+        for (ops.items) |*op| op.deinit(allocator);
+        ops.deinit(allocator);
+    }
+
+    for (build_array.items) |item| {
+        const obj = try expectObject(item, "build op");
+        const op_name = try expectNonEmptyString(obj, "op");
+
+        if (std.mem.eql(u8, op_name, "knx.fs.copy")) {
+            const from_text = try expectNonEmptyString(obj, "from");
+            const to_text = try expectNonEmptyString(obj, "to");
+            try validateWorkspaceRelativePath(from_text);
+            try validateWorkspaceRelativePath(to_text);
+
+            const from_path = try allocator.dupe(u8, from_text);
+            errdefer allocator.free(from_path);
+            const to_path = try allocator.dupe(u8, to_text);
+            errdefer allocator.free(to_path);
+
+            try ops.append(allocator, .{
+                .fs_copy = .{
+                    .from_path = from_path,
+                    .to_path = to_path,
+                },
+            });
+            continue;
+        }
+
+        if (std.mem.eql(u8, op_name, "knx.c.compile")) {
+            try ops.append(allocator, .c_compile);
+            continue;
+        }
+        if (std.mem.eql(u8, op_name, "knx.zig.link")) {
+            try ops.append(allocator, .zig_link);
+            continue;
+        }
+        if (std.mem.eql(u8, op_name, "knx.archive.pack")) {
+            try ops.append(allocator, .archive_pack);
+            continue;
+        }
+        return error.OperatorNotAllowed;
+    }
+
+    return .{
+        .ops = try ops.toOwnedSlice(allocator),
+    };
+}
+
+pub fn parseBuildSpecStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!BuildSpec {
+    return parseBuildSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
+}
+
 pub fn computeKnxDigestHex(canonical_json: []const u8) [64]u8 {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(canonical_json, &digest, .{});
@@ -359,6 +461,20 @@ fn validateOutputPath(path: []const u8) !void {
     while (it.next()) |segment| {
         if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) {
             return error.InvalidOutputPath;
+        }
+    }
+}
+
+fn validateWorkspaceRelativePath(path: []const u8) !void {
+    if (path.len == 0) return error.ValueInvalid;
+    if (std.fs.path.isAbsolute(path)) return error.ValueInvalid;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.ValueInvalid;
+    if (std.mem.indexOfScalar(u8, path, ':') != null) return error.ValueInvalid;
+
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) {
+            return error.ValueInvalid;
         }
     }
 }
@@ -656,4 +772,47 @@ test "parseOutputSpec parses output entries" {
     try std.testing.expectEqual(@as(usize, 1), spec.entries.len);
     try std.testing.expectEqualStrings("kilnexus-out/app", spec.entries[0].path);
     try std.testing.expectEqual(@as(u16, 0o755), spec.entries[0].mode);
+}
+
+test "parseBuildSpec parses fs.copy operation" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    { "op": "knx.fs.copy", "from": "src/main.c", "to": "kilnexus-out/app" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseBuildSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), spec.ops.len);
+    switch (spec.ops[0]) {
+        .fs_copy => |copy| {
+            try std.testing.expectEqualStrings("src/main.c", copy.from_path);
+            try std.testing.expectEqualStrings("kilnexus-out/app", copy.to_path);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }

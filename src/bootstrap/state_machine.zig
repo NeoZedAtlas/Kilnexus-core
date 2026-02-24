@@ -6,6 +6,7 @@ const mini_tuf = @import("../trust/mini_tuf.zig");
 const kx_error = @import("../errors/kx_error.zig");
 const toolchain_installer = @import("toolchain_installer.zig");
 const workspace_projector = @import("workspace_projector.zig");
+const build_executor = @import("build_executor.zig");
 const output_publisher = @import("output_publisher.zig");
 
 pub const State = enum {
@@ -174,6 +175,12 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         return err;
     };
     defer workspace_spec.deinit(allocator);
+    var build_spec = validator.parseBuildSpecStrict(allocator, parsed.canonical_json) catch |err| {
+        failed_at.* = .parse_knxfile;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+    defer build_spec.deinit(allocator);
     var output_spec = validator.parseOutputSpecStrict(allocator, parsed.canonical_json) catch |err| {
         failed_at.* = .parse_knxfile;
         push(&trace, allocator, .failed) catch {};
@@ -281,6 +288,11 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         return err;
     };
     errdefer allocator.free(workspace_cwd);
+    build_executor.executeBuildGraph(allocator, workspace_cwd, &build_spec) catch |err| {
+        failed_at.* = .execute_build_graph;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
 
     try push(&trace, allocator, .verify_outputs);
     output_publisher.verifyWorkspaceOutputs(allocator, workspace_cwd, &output_spec) catch |err| {
@@ -385,11 +397,11 @@ test "run completes bootstrap happy path" {
 
     try tmp.dir.makePath("project");
     try tmp.dir.writeFile(.{
-        .sub_path = "project/app",
+        .sub_path = "project/src/app",
         .data = "artifact\n",
     });
 
-    const host_source = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/app", .{tmp.sub_path[0..]});
+    const host_source = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/src/app", .{tmp.sub_path[0..]});
     defer allocator.free(host_source);
     const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
     defer allocator.free(cache_root);
@@ -417,7 +429,10 @@ test "run completes bootstrap happy path" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  }},
         \\  "inputs": [
-        \\    {{ "path": "kilnexus-out/app", "source": "{s}" }}
+        \\    {{ "path": "src/app", "source": "{s}" }}
+        \\  ],
+        \\  "build": [
+        \\    {{ "op": "knx.fs.copy", "from": "src/app", "to": "kilnexus-out/app" }}
         \\  ],
         \\  "outputs": [
         \\    {{ "path": "kilnexus-out/app", "mode": "0755" }}
@@ -644,6 +659,54 @@ test "attemptRunWithOptions fails in execute stage when declared source is missi
             try std.testing.expectEqual(State.execute_build_graph, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
             try std.testing.expectEqual(error.IoNotFound, failure.cause);
+        },
+    }
+}
+
+test "attemptRunWithOptions maps unimplemented builtin operator to build failure" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    { "op": "knx.c.compile" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    const attempt = attemptRunWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+    });
+
+    switch (attempt) {
+        .success => |*result| {
+            defer result.deinit(allocator);
+            return error.ExpectedFailure;
+        },
+        .failure => |failure| {
+            try std.testing.expectEqual(State.execute_build_graph, failure.at);
+            try std.testing.expectEqual(kx_error.Code.KX_BUILD_OPERATOR_FAILED, failure.code);
+            try std.testing.expectEqual(error.OperatorFailed, failure.cause);
         },
     }
 }
