@@ -82,11 +82,12 @@ pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options:
 
 pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) RunAttempt {
     const source = std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes) catch |err| {
+        const cause = kx_error.normalizeIo(err);
         return .{
             .failure = .{
                 .at = .init,
-                .code = kx_error.classifyIo(err),
-                .cause = err,
+                .code = kx_error.classifyIo(cause),
+                .cause = cause,
             },
         };
     };
@@ -194,6 +195,7 @@ fn classifyByState(state: State, err: anyerror) kx_error.Code {
 
 fn normalizeCauseByState(state: State, err: anyerror) anyerror {
     return switch (state) {
+        .init, .resolve_toolchain, .download_blob, .unpack_staging, .seal_cache_object => kx_error.normalizeIo(err),
         .load_trust_metadata, .verify_metadata_chain => mini_tuf.normalizeError(err),
         .parse_knxfile => parse_errors.normalize(err),
         .verify_blob, .compute_tree_root, .verify_tree_root => kx_error.normalizeIntegrity(err),
@@ -321,4 +323,24 @@ test "attemptRunWithOptions maps integrity failure by error kind" {
 test "attemptRunWithOptions maps publish failure by error kind" {
     const mapped = classifyByState(.atomic_publish, normalizeCauseByState(.atomic_publish, error.FsyncFailed));
     try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped);
+}
+
+test "attemptRunFromPathWithOptions returns canonical io cause for missing input" {
+    const allocator = std.testing.allocator;
+    const attempt = attemptRunFromPathWithOptions(allocator, "__knx_missing_input__.knx", .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+    });
+
+    switch (attempt) {
+        .success => |*result| {
+            defer result.deinit(allocator);
+            return error.ExpectedFailure;
+        },
+        .failure => |failure| {
+            try std.testing.expectEqual(State.init, failure.at);
+            try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
+            try std.testing.expectEqual(error.IoNotFound, failure.cause);
+        },
+    }
 }

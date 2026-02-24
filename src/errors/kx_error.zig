@@ -103,6 +103,18 @@ pub const PublishError = error{
     Internal,
 };
 
+pub const IoError = error{
+    IoNotFound,
+    IoAccessDenied,
+    IoPathInvalid,
+    IoReadFailed,
+    IoWriteFailed,
+    IoNoSpace,
+    IoRenameFailed,
+    IoAlreadyExists,
+    Internal,
+};
+
 pub fn describe(code: Code) Descriptor {
     return switch (code) {
         .KX_OK => .{ .family = .internal, .summary = "ok" },
@@ -242,31 +254,14 @@ pub fn classifyParse(err: anyerror) Code {
 }
 
 pub fn classifyIo(err: anyerror) Code {
-    if (err == error.FileNotFound) return .KX_IO_NOT_FOUND;
-
-    if (err == error.AccessDenied or err == error.PermissionDenied) {
-        return .KX_IO_ACCESS_DENIED;
-    }
-
-    if (err == error.PathAlreadyExists) return .KX_IO_ALREADY_EXISTS;
-
-    if (err == error.NameTooLong or err == error.NotDir or err == error.InvalidUtf8 or err == error.InvalidWtf8 or err == error.BadPathName or err == error.SymLinkLoop) {
-        return .KX_IO_PATH_INVALID;
-    }
-
-    if (err == error.DiskQuota or err == error.NoSpaceLeft) {
-        return .KX_IO_NO_SPACE;
-    }
-
-    if (err == error.RenameAcrossMountPoints) return .KX_IO_RENAME_FAILED;
-
-    if (err == error.ReadOnlyFileSystem or err == error.FileBusy) {
-        return .KX_IO_WRITE_FAILED;
-    }
-
-    if (err == error.InputOutput or err == error.Unexpected) {
-        return .KX_IO_READ_FAILED;
-    }
+    if (err == error.IoNotFound) return .KX_IO_NOT_FOUND;
+    if (err == error.IoAccessDenied) return .KX_IO_ACCESS_DENIED;
+    if (err == error.IoAlreadyExists) return .KX_IO_ALREADY_EXISTS;
+    if (err == error.IoPathInvalid) return .KX_IO_PATH_INVALID;
+    if (err == error.IoNoSpace) return .KX_IO_NO_SPACE;
+    if (err == error.IoRenameFailed) return .KX_IO_RENAME_FAILED;
+    if (err == error.IoWriteFailed) return .KX_IO_WRITE_FAILED;
+    if (err == error.IoReadFailed) return .KX_IO_READ_FAILED;
 
     return .KX_INTERNAL;
 }
@@ -431,6 +426,42 @@ pub fn normalizePublish(err: anyerror) PublishError {
     return error.Internal;
 }
 
+pub fn normalizeIo(err: anyerror) IoError {
+    if (err == error.IoNotFound or err == error.FileNotFound) {
+        return error.IoNotFound;
+    }
+
+    if (err == error.IoAccessDenied or err == error.AccessDenied or err == error.PermissionDenied) {
+        return error.IoAccessDenied;
+    }
+
+    if (err == error.IoAlreadyExists or err == error.PathAlreadyExists) {
+        return error.IoAlreadyExists;
+    }
+
+    if (err == error.IoPathInvalid or err == error.NameTooLong or err == error.NotDir or err == error.InvalidUtf8 or err == error.InvalidWtf8 or err == error.BadPathName or err == error.SymLinkLoop) {
+        return error.IoPathInvalid;
+    }
+
+    if (err == error.IoNoSpace or err == error.DiskQuota or err == error.NoSpaceLeft) {
+        return error.IoNoSpace;
+    }
+
+    if (err == error.IoRenameFailed or err == error.RenameAcrossMountPoints) {
+        return error.IoRenameFailed;
+    }
+
+    if (err == error.IoWriteFailed or err == error.ReadOnlyFileSystem or err == error.FileBusy) {
+        return error.IoWriteFailed;
+    }
+
+    if (err == error.IoReadFailed or err == error.InputOutput or err == error.Unexpected) {
+        return error.IoReadFailed;
+    }
+
+    return error.Internal;
+}
+
 test "classifyTrust maps rollback and expiry" {
     try std.testing.expectEqual(Code.KX_TRUST_ROLLBACK, classifyTrust(error.RollbackDetected));
     try std.testing.expectEqual(Code.KX_TRUST_METADATA_EXPIRED, classifyTrust(error.MetadataExpired));
@@ -455,8 +486,8 @@ test "buildErrorId is stable" {
 }
 
 test "classifyIo maps not-found and no-space" {
-    try std.testing.expectEqual(Code.KX_IO_NOT_FOUND, classifyIo(error.FileNotFound));
-    try std.testing.expectEqual(Code.KX_IO_NO_SPACE, classifyIo(error.NoSpaceLeft));
+    try std.testing.expectEqual(Code.KX_IO_NOT_FOUND, classifyIo(error.IoNotFound));
+    try std.testing.expectEqual(Code.KX_IO_NO_SPACE, classifyIo(error.IoNoSpace));
 }
 
 test "classifyIntegrity maps blob and traversal" {
@@ -487,4 +518,10 @@ test "normalizeBuild maps legacy aliases" {
 test "normalizePublish maps legacy aliases" {
     try std.testing.expect(normalizePublish(error.AtomicRenameFailed) == error.AtomicFailed);
     try std.testing.expect(normalizePublish(error.AccessDenied) == error.PermissionDenied);
+}
+
+test "normalizeIo maps filesystem aliases" {
+    try std.testing.expect(normalizeIo(error.FileNotFound) == error.IoNotFound);
+    try std.testing.expect(normalizeIo(error.PermissionDenied) == error.IoAccessDenied);
+    try std.testing.expect(normalizeIo(error.NoSpaceLeft) == error.IoNoSpace);
 }
