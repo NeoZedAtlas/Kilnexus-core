@@ -50,9 +50,17 @@ pub fn main() !void {
         },
         .failure => |failure| {
             const descriptor = kx_error.describe(failure.code);
+            var error_id_buf: [128]u8 = undefined;
+            const error_id = kx_error.buildErrorId(
+                &error_id_buf,
+                failure.code,
+                @tagName(failure.at),
+                @errorName(failure.cause),
+            );
             std.debug.print(
-                "{{\"status\":\"failed\",\"code\":\"{s}\",\"code_num\":{d},\"family\":\"{s}\",\"state\":\"{s}\",\"cause\":\"{s}\",\"summary\":\"{s}\"}}\n",
+                "{{\"status\":\"failed\",\"error_id\":\"{s}\",\"code\":\"{s}\",\"code_num\":{d},\"family\":\"{s}\",\"state\":\"{s}\",\"cause\":\"{s}\",\"summary\":\"{s}\"}}\n",
                 .{
+                    error_id,
                     @tagName(failure.code),
                     @intFromEnum(failure.code),
                     @tagName(descriptor.family),

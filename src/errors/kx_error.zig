@@ -18,11 +18,17 @@ pub const Code = enum(u32) {
     KX_PARSE_CANONICAL = 1003,
 
     KX_TRUST_METADATA_MISSING = 2001,
-    KX_TRUST_SIGNATURE = 2002,
-    KX_TRUST_EXPIRED = 2003,
-    KX_TRUST_ROLLBACK = 2004,
-    KX_TRUST_VERSION_LINK = 2005,
-    KX_TRUST_POLICY = 2006,
+    KX_TRUST_METADATA_MALFORMED = 2002,
+    KX_TRUST_ROLE_POLICY = 2003,
+    KX_TRUST_KEY_UNSUPPORTED = 2004,
+    KX_TRUST_SIGNATURE_INVALID = 2005,
+    KX_TRUST_SIGNATURE_THRESHOLD = 2006,
+    KX_TRUST_METADATA_EXPIRED = 2007,
+    KX_TRUST_ROLLBACK = 2008,
+    KX_TRUST_VERSION_LINK = 2009,
+    KX_TRUST_VERSION_INVALID = 2010,
+    KX_TRUST_STATE_IO = 2011,
+    KX_TRUST_STATE_INVALID = 2012,
 
     KX_IO_READ = 3001,
     KX_IO_WRITE = 3002,
@@ -50,11 +56,17 @@ pub fn describe(code: Code) Descriptor {
         .KX_PARSE_CANONICAL => .{ .family = .parse, .summary = "lockfile canonicalization failed" },
 
         .KX_TRUST_METADATA_MISSING => .{ .family = .trust, .summary = "required trust metadata missing" },
-        .KX_TRUST_SIGNATURE => .{ .family = .trust, .summary = "signature threshold verification failed" },
-        .KX_TRUST_EXPIRED => .{ .family = .trust, .summary = "trust metadata expired or has invalid expiry timestamp" },
+        .KX_TRUST_METADATA_MALFORMED => .{ .family = .trust, .summary = "trust metadata JSON is malformed or missing required fields" },
+        .KX_TRUST_ROLE_POLICY => .{ .family = .trust, .summary = "trust role policy is invalid" },
+        .KX_TRUST_KEY_UNSUPPORTED => .{ .family = .trust, .summary = "trust key type or signature scheme is unsupported" },
+        .KX_TRUST_SIGNATURE_INVALID => .{ .family = .trust, .summary = "trust signature verification failed" },
+        .KX_TRUST_SIGNATURE_THRESHOLD => .{ .family = .trust, .summary = "trust signature threshold not met" },
+        .KX_TRUST_METADATA_EXPIRED => .{ .family = .trust, .summary = "trust metadata expired or has invalid expiry timestamp" },
         .KX_TRUST_ROLLBACK => .{ .family = .trust, .summary = "rollback detected in trust metadata versions" },
         .KX_TRUST_VERSION_LINK => .{ .family = .trust, .summary = "metadata version link mismatch" },
-        .KX_TRUST_POLICY => .{ .family = .trust, .summary = "trust metadata policy is invalid" },
+        .KX_TRUST_VERSION_INVALID => .{ .family = .trust, .summary = "metadata version is invalid" },
+        .KX_TRUST_STATE_IO => .{ .family = .trust, .summary = "trust state persistence IO failed" },
+        .KX_TRUST_STATE_INVALID => .{ .family = .trust, .summary = "trust state file is malformed or invalid" },
 
         .KX_IO_READ => .{ .family = .io, .summary = "file read failed" },
         .KX_IO_WRITE => .{ .family = .io, .summary = "file write failed" },
@@ -70,27 +82,64 @@ pub fn describe(code: Code) Descriptor {
     };
 }
 
+pub fn buildErrorId(
+    buffer: []u8,
+    code: Code,
+    state_name: []const u8,
+    cause_name: []const u8,
+) []const u8 {
+    return std.fmt.bufPrint(
+        buffer,
+        "kx:{d}:{s}:{s}",
+        .{ @intFromEnum(code), state_name, cause_name },
+    ) catch "kx:id_overflow";
+}
+
 pub fn classifyTrust(err: anyerror) Code {
-    if (err == error.FileNotFound or err == error.MissingRequiredField or err == error.MissingSignedSection or err == error.MissingSignaturesSection or err == error.MissingRoleRule) {
+    if (err == error.FileNotFound) {
         return .KX_TRUST_METADATA_MISSING;
     }
 
-    if (err == error.SignatureThresholdNotMet or err == error.SignatureVerificationFailed or err == error.EncodingError or err == error.IdentityElement or err == error.WeakPublicKey or err == error.NonCanonical) {
-        return .KX_TRUST_SIGNATURE;
+    if (err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger or err == error.MissingRequiredField or err == error.MissingSignedSection or err == error.MissingSignaturesSection) {
+        return .KX_TRUST_METADATA_MALFORMED;
+    }
+
+    if (err == error.MissingRoleRule or err == error.InvalidRoleType or err == error.InvalidThreshold or err == error.EmptyRoleKeyIds or err == error.EmptyRoleKeyId or err == error.InvalidSignatureEntry) {
+        return .KX_TRUST_ROLE_POLICY;
+    }
+
+    if (err == error.UnsupportedKeyType or err == error.UnsupportedSignatureScheme) {
+        return .KX_TRUST_KEY_UNSUPPORTED;
+    }
+
+    if (err == error.SignatureVerificationFailed or err == error.EncodingError or err == error.IdentityElement or err == error.WeakPublicKey or err == error.NonCanonical or err == error.InvalidHexLength or err == error.InvalidCharacter) {
+        return .KX_TRUST_SIGNATURE_INVALID;
+    }
+
+    if (err == error.SignatureThresholdNotMet) {
+        return .KX_TRUST_SIGNATURE_THRESHOLD;
     }
 
     if (err == error.MetadataExpired or err == error.InvalidTimestampFormat or err == error.InvalidTimestampYear or err == error.InvalidTimestampMonth or err == error.InvalidTimestampDay or err == error.InvalidTimestampClock) {
-        return .KX_TRUST_EXPIRED;
+        return .KX_TRUST_METADATA_EXPIRED;
     }
 
     if (err == error.RollbackDetected) return .KX_TRUST_ROLLBACK;
 
-    if (err == error.LinkedMetadataVersionMismatch or err == error.InvalidLinkedVersion or err == error.MissingLinkedMetadata or err == error.InvalidMetadataVersion) {
+    if (err == error.LinkedMetadataVersionMismatch or err == error.InvalidLinkedVersion or err == error.MissingLinkedMetadata) {
         return .KX_TRUST_VERSION_LINK;
     }
 
-    if (err == error.InvalidRoleType or err == error.InvalidThreshold or err == error.EmptyRoleKeyIds or err == error.EmptyRoleKeyId or err == error.UnsupportedKeyType or err == error.UnsupportedSignatureScheme or err == error.InvalidSignatureEntry) {
-        return .KX_TRUST_POLICY;
+    if (err == error.InvalidMetadataVersion) {
+        return .KX_TRUST_VERSION_INVALID;
+    }
+
+    if (err == error.InvalidStateVersion) {
+        return .KX_TRUST_STATE_INVALID;
+    }
+
+    if (err == error.AccessDenied or err == error.PermissionDenied or err == error.ReadOnlyFileSystem or err == error.NoSpaceLeft or err == error.InputOutput) {
+        return .KX_TRUST_STATE_IO;
     }
 
     return .KX_INTERNAL;
@@ -124,10 +173,21 @@ pub fn classifyIo(err: anyerror) Code {
 
 test "classifyTrust maps rollback and expiry" {
     try std.testing.expectEqual(Code.KX_TRUST_ROLLBACK, classifyTrust(error.RollbackDetected));
-    try std.testing.expectEqual(Code.KX_TRUST_EXPIRED, classifyTrust(error.MetadataExpired));
+    try std.testing.expectEqual(Code.KX_TRUST_METADATA_EXPIRED, classifyTrust(error.MetadataExpired));
+}
+
+test "classifyTrust maps signature and policy details" {
+    try std.testing.expectEqual(Code.KX_TRUST_SIGNATURE_THRESHOLD, classifyTrust(error.SignatureThresholdNotMet));
+    try std.testing.expectEqual(Code.KX_TRUST_ROLE_POLICY, classifyTrust(error.InvalidThreshold));
 }
 
 test "classifyParse maps schema and syntax" {
     try std.testing.expectEqual(Code.KX_PARSE_SYNTAX, classifyParse(error.Parse));
     try std.testing.expectEqual(Code.KX_PARSE_SCHEMA, classifyParse(error.InvalidPolicyNetwork));
+}
+
+test "buildErrorId is stable" {
+    var buf: [96]u8 = undefined;
+    const id = buildErrorId(&buf, .KX_TRUST_METADATA_MISSING, "load_trust_metadata", "FileNotFound");
+    try std.testing.expectEqualStrings("kx:2001:load_trust_metadata:FileNotFound", id);
 }
