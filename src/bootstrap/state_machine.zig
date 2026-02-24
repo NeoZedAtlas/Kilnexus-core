@@ -1,5 +1,6 @@
 const std = @import("std");
 const abi_parser = @import("../parser/abi_parser.zig");
+const validator = @import("../knx/validator.zig");
 
 pub const State = enum {
     init,
@@ -23,6 +24,8 @@ pub const State = enum {
 pub const RunResult = struct {
     trace: std.ArrayList(State),
     canonical_json: []u8,
+    verify_mode: validator.VerifyMode,
+    knx_digest_hex: [64]u8,
     final_state: State,
 
     pub fn deinit(self: *RunResult, allocator: std.mem.Allocator) void {
@@ -54,6 +57,11 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8) !RunResult {
         return err;
     };
     errdefer allocator.free(parsed.canonical_json);
+    const validation = validator.validateCanonicalJson(allocator, parsed.canonical_json) catch |err| {
+        try push(&trace, allocator, .failed);
+        return err;
+    };
+    const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
 
     try push(&trace, allocator, .resolve_toolchain);
     try push(&trace, allocator, .download_blob);
@@ -70,6 +78,8 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8) !RunResult {
     return .{
         .trace = trace,
         .canonical_json = parsed.canonical_json,
+        .verify_mode = validation.verify_mode,
+        .knx_digest_hex = knx_digest_hex,
         .final_state = .done,
     };
 }
@@ -80,7 +90,30 @@ fn push(trace: *std.ArrayList(State), allocator: std.mem.Allocator, state: State
 
 test "run completes bootstrap happy path" {
     const allocator = std.testing.allocator;
-    const source = "{\"version\":1}";
+    const source =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
 
     var result = try run(allocator, source);
     defer result.deinit(allocator);
@@ -89,7 +122,8 @@ test "run completes bootstrap happy path" {
     try std.testing.expectEqual(@as(usize, 15), result.trace.items.len);
     try std.testing.expectEqual(State.parse_knxfile, result.trace.items[3]);
     try std.testing.expectEqual(State.done, result.trace.items[result.trace.items.len - 1]);
-    try std.testing.expectEqualStrings("{\"version\":1}", result.canonical_json);
+    try std.testing.expectEqual(validator.VerifyMode.strict, result.verify_mode);
+    try std.testing.expectEqual(@as(usize, 64), result.knx_digest_hex.len);
 }
 
 test "run fails on malformed lockfile" {
@@ -97,4 +131,34 @@ test "run fails on malformed lockfile" {
     const source = "version=1";
 
     try std.testing.expectError(error.Schema, run(allocator, source));
+}
+
+test "run fails on policy violation" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "on",
+        \\    "clock": "fixed",
+        \\    "verify_mode": "strict"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+    try std.testing.expectError(error.InvalidPolicyNetwork, run(allocator, source));
 }

@@ -24,6 +24,8 @@ pub fn main() !void {
     defer run_result.deinit(allocator);
 
     std.debug.print("Bootstrap completed with state: {s}\n", .{@tagName(run_result.final_state)});
+    std.debug.print("Verify mode: {s}\n", .{@tagName(run_result.verify_mode)});
+    std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
     std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});
 
     for (run_result.trace.items) |state| {
