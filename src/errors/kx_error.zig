@@ -48,9 +48,23 @@ pub const Code = enum(u32) {
 
     KX_INTEGRITY_BLOB_MISMATCH = 4001,
     KX_INTEGRITY_TREE_MISMATCH = 4002,
+    KX_INTEGRITY_SIZE_MISMATCH = 4003,
+    KX_INTEGRITY_HASH_UNSUPPORTED = 4004,
+    KX_INTEGRITY_PATH_TRAVERSAL = 4005,
+    KX_INTEGRITY_SYMLINK_POLICY = 4006,
 
     KX_BUILD_OPERATOR_FAILED = 5001,
+    KX_BUILD_OPERATOR_DISALLOWED = 5002,
+    KX_BUILD_TOOLCHAIN_MISSING = 5003,
+    KX_BUILD_SANDBOX_VIOLATION = 5004,
+    KX_BUILD_GRAPH_INVALID = 5005,
+    KX_BUILD_TIMEOUT = 5006,
+
     KX_PUBLISH_ATOMIC = 6001,
+    KX_PUBLISH_OUTPUT_MISSING = 6002,
+    KX_PUBLISH_OUTPUT_HASH_MISMATCH = 6003,
+    KX_PUBLISH_FSYNC_FAILED = 6004,
+    KX_PUBLISH_PERMISSION = 6005,
 
     KX_INTERNAL = 9000,
 };
@@ -98,9 +112,23 @@ pub fn describe(code: Code) Descriptor {
 
         .KX_INTEGRITY_BLOB_MISMATCH => .{ .family = .integrity, .summary = "blob integrity mismatch" },
         .KX_INTEGRITY_TREE_MISMATCH => .{ .family = .integrity, .summary = "tree integrity mismatch" },
+        .KX_INTEGRITY_SIZE_MISMATCH => .{ .family = .integrity, .summary = "content size mismatch" },
+        .KX_INTEGRITY_HASH_UNSUPPORTED => .{ .family = .integrity, .summary = "unsupported hash algorithm in metadata" },
+        .KX_INTEGRITY_PATH_TRAVERSAL => .{ .family = .integrity, .summary = "path traversal detected while unpacking" },
+        .KX_INTEGRITY_SYMLINK_POLICY => .{ .family = .integrity, .summary = "symlink policy violation in unpacked tree" },
 
         .KX_BUILD_OPERATOR_FAILED => .{ .family = .build, .summary = "build operator failed" },
+        .KX_BUILD_OPERATOR_DISALLOWED => .{ .family = .build, .summary = "operator is disallowed by policy" },
+        .KX_BUILD_TOOLCHAIN_MISSING => .{ .family = .build, .summary = "required toolchain not available" },
+        .KX_BUILD_SANDBOX_VIOLATION => .{ .family = .build, .summary = "sandbox policy violation during build" },
+        .KX_BUILD_GRAPH_INVALID => .{ .family = .build, .summary = "build graph is invalid" },
+        .KX_BUILD_TIMEOUT => .{ .family = .build, .summary = "build step timeout exceeded" },
+
         .KX_PUBLISH_ATOMIC => .{ .family = .publish, .summary = "atomic publish failed" },
+        .KX_PUBLISH_OUTPUT_MISSING => .{ .family = .publish, .summary = "declared output missing at publish boundary" },
+        .KX_PUBLISH_OUTPUT_HASH_MISMATCH => .{ .family = .publish, .summary = "published output hash mismatch" },
+        .KX_PUBLISH_FSYNC_FAILED => .{ .family = .publish, .summary = "fsync failed before publish" },
+        .KX_PUBLISH_PERMISSION => .{ .family = .publish, .summary = "publish path permission failure" },
 
         .KX_INTERNAL => .{ .family = .internal, .summary = "internal error" },
     };
@@ -232,6 +260,86 @@ pub fn classifyIo(err: anyerror) Code {
     return .KX_INTERNAL;
 }
 
+pub fn classifyIntegrity(err: anyerror) Code {
+    if (err == error.BlobHashMismatch or err == error.BlobDigestMismatch) {
+        return .KX_INTEGRITY_BLOB_MISMATCH;
+    }
+
+    if (err == error.TreeRootMismatch or err == error.TreeDigestMismatch) {
+        return .KX_INTEGRITY_TREE_MISMATCH;
+    }
+
+    if (err == error.SizeMismatch) {
+        return .KX_INTEGRITY_SIZE_MISMATCH;
+    }
+
+    if (err == error.UnsupportedHashAlgorithm) {
+        return .KX_INTEGRITY_HASH_UNSUPPORTED;
+    }
+
+    if (err == error.PathTraversalDetected) {
+        return .KX_INTEGRITY_PATH_TRAVERSAL;
+    }
+
+    if (err == error.SymlinkPolicyViolation) {
+        return .KX_INTEGRITY_SYMLINK_POLICY;
+    }
+
+    return .KX_INTERNAL;
+}
+
+pub fn classifyBuild(err: anyerror) Code {
+    if (err == error.OperatorExecutionFailed) {
+        return .KX_BUILD_OPERATOR_FAILED;
+    }
+
+    if (err == error.OperatorNotAllowed) {
+        return .KX_BUILD_OPERATOR_DISALLOWED;
+    }
+
+    if (err == error.ToolchainNotFound or err == error.CompilerNotFound) {
+        return .KX_BUILD_TOOLCHAIN_MISSING;
+    }
+
+    if (err == error.SandboxViolation or err == error.NetworkDisabled) {
+        return .KX_BUILD_SANDBOX_VIOLATION;
+    }
+
+    if (err == error.InvalidBuildGraph or err == error.DependencyCycle) {
+        return .KX_BUILD_GRAPH_INVALID;
+    }
+
+    if (err == error.Timeout) {
+        return .KX_BUILD_TIMEOUT;
+    }
+
+    return .KX_INTERNAL;
+}
+
+pub fn classifyPublish(err: anyerror) Code {
+    if (err == error.AtomicRenameFailed) {
+        return .KX_PUBLISH_ATOMIC;
+    }
+
+    if (err == error.OutputMissing) {
+        return .KX_PUBLISH_OUTPUT_MISSING;
+    }
+
+    if (err == error.OutputHashMismatch) {
+        return .KX_PUBLISH_OUTPUT_HASH_MISMATCH;
+    }
+
+    if (err == error.FsyncFailed) {
+        return .KX_PUBLISH_FSYNC_FAILED;
+    }
+
+    if (err == error.AccessDenied or err == error.PermissionDenied) {
+        return .KX_PUBLISH_PERMISSION;
+    }
+
+    return .KX_INTERNAL;
+}
+
 test "classifyTrust maps rollback and expiry" {
     try std.testing.expectEqual(Code.KX_TRUST_ROLLBACK, classifyTrust(error.RollbackDetected));
     try std.testing.expectEqual(Code.KX_TRUST_METADATA_EXPIRED, classifyTrust(error.MetadataExpired));
@@ -257,4 +365,19 @@ test "buildErrorId is stable" {
 test "classifyIo maps not-found and no-space" {
     try std.testing.expectEqual(Code.KX_IO_NOT_FOUND, classifyIo(error.FileNotFound));
     try std.testing.expectEqual(Code.KX_IO_NO_SPACE, classifyIo(error.NoSpaceLeft));
+}
+
+test "classifyIntegrity maps blob and traversal" {
+    try std.testing.expectEqual(Code.KX_INTEGRITY_BLOB_MISMATCH, classifyIntegrity(error.BlobHashMismatch));
+    try std.testing.expectEqual(Code.KX_INTEGRITY_PATH_TRAVERSAL, classifyIntegrity(error.PathTraversalDetected));
+}
+
+test "classifyBuild maps operator and timeout" {
+    try std.testing.expectEqual(Code.KX_BUILD_OPERATOR_FAILED, classifyBuild(error.OperatorExecutionFailed));
+    try std.testing.expectEqual(Code.KX_BUILD_TIMEOUT, classifyBuild(error.Timeout));
+}
+
+test "classifyPublish maps output and fsync" {
+    try std.testing.expectEqual(Code.KX_PUBLISH_OUTPUT_MISSING, classifyPublish(error.OutputMissing));
+    try std.testing.expectEqual(Code.KX_PUBLISH_FSYNC_FAILED, classifyPublish(error.FsyncFailed));
 }

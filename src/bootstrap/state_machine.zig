@@ -182,10 +182,10 @@ fn classifyByState(state: State, err: anyerror) kx_error.Code {
         .load_trust_metadata, .verify_metadata_chain => kx_error.classifyTrust(err),
         .parse_knxfile => kx_error.classifyParse(err),
         .resolve_toolchain, .download_blob, .unpack_staging, .seal_cache_object => kx_error.classifyIo(err),
-        .verify_blob => .KX_INTEGRITY_BLOB_MISMATCH,
-        .compute_tree_root, .verify_tree_root => .KX_INTEGRITY_TREE_MISMATCH,
-        .execute_build_graph => .KX_BUILD_OPERATOR_FAILED,
-        .verify_outputs, .atomic_publish => .KX_PUBLISH_ATOMIC,
+        .verify_blob => kx_error.classifyIntegrity(err),
+        .compute_tree_root, .verify_tree_root => kx_error.classifyIntegrity(err),
+        .execute_build_graph => kx_error.classifyBuild(err),
+        .verify_outputs, .atomic_publish => kx_error.classifyPublish(err),
         else => .KX_INTERNAL,
     };
 }
@@ -289,4 +289,23 @@ test "attemptRunWithOptions returns structured parse error" {
             try std.testing.expectEqual(error.Schema, failure.cause);
         },
     }
+}
+
+test "attemptRunWithOptions maps integrity failure by error kind" {
+    const allocator = std.testing.allocator;
+    const source = "{}";
+
+    const mapped = classifyByState(.verify_blob, error.BlobHashMismatch);
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_BLOB_MISMATCH, mapped);
+
+    const mapped_tree = classifyByState(.verify_tree_root, error.PathTraversalDetected);
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped_tree);
+
+    _ = source;
+    _ = allocator;
+}
+
+test "attemptRunWithOptions maps publish failure by error kind" {
+    const mapped = classifyByState(.atomic_publish, error.FsyncFailed);
+    try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped);
 }
