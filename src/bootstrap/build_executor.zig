@@ -1,15 +1,32 @@
 const std = @import("std");
 const validator = @import("../knx/validator.zig");
 
+pub const ExecuteOptions = struct {
+    toolchain_root: ?[]const u8 = null,
+    max_output_bytes: usize = 256 * 1024,
+};
+
 pub fn executeBuildGraph(
     allocator: std.mem.Allocator,
     workspace_cwd: []const u8,
     build_spec: *const validator.BuildSpec,
+    options: ExecuteOptions,
 ) !void {
+    var zig_exe_path: ?[]u8 = null;
+    defer if (zig_exe_path) |path| allocator.free(path);
+
     for (build_spec.ops) |op| {
         switch (op) {
             .fs_copy => |copy| try executeFsCopy(allocator, workspace_cwd, copy),
-            .c_compile, .zig_link, .archive_pack => return error.OperatorExecutionFailed,
+            .c_compile => |compile| {
+                const zig_exe = try requireZigExecutable(allocator, options.toolchain_root, &zig_exe_path);
+                try executeCCompile(allocator, workspace_cwd, zig_exe, compile, options.max_output_bytes);
+            },
+            .zig_link => |link| {
+                const zig_exe = try requireZigExecutable(allocator, options.toolchain_root, &zig_exe_path);
+                try executeZigLink(allocator, workspace_cwd, zig_exe, link, options.max_output_bytes);
+            },
+            .archive_pack => return error.OperatorExecutionFailed,
         }
     }
 }
@@ -41,11 +58,125 @@ fn executeFsCopy(
     };
 }
 
+fn executeCCompile(
+    allocator: std.mem.Allocator,
+    workspace_cwd: []const u8,
+    zig_exe: []const u8,
+    compile: validator.CCompileOp,
+    max_output_bytes: usize,
+) !void {
+    const out_abs = try std.fs.path.join(allocator, &.{ workspace_cwd, compile.out_path });
+    defer allocator.free(out_abs);
+    if (std.fs.path.dirname(out_abs)) |parent| {
+        try std.fs.cwd().makePath(parent);
+    }
+
+    const argv = [_][]const u8{
+        zig_exe,
+        "cc",
+        "-c",
+        compile.src_path,
+        "-o",
+        compile.out_path,
+    };
+    try runCommand(allocator, workspace_cwd, &argv, max_output_bytes);
+}
+
+fn executeZigLink(
+    allocator: std.mem.Allocator,
+    workspace_cwd: []const u8,
+    zig_exe: []const u8,
+    link: validator.ZigLinkOp,
+    max_output_bytes: usize,
+) !void {
+    const out_abs = try std.fs.path.join(allocator, &.{ workspace_cwd, link.out_path });
+    defer allocator.free(out_abs);
+    if (std.fs.path.dirname(out_abs)) |parent| {
+        try std.fs.cwd().makePath(parent);
+    }
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, zig_exe);
+    try argv.append(allocator, "cc");
+    for (link.object_paths) |obj| try argv.append(allocator, obj);
+    try argv.append(allocator, "-o");
+    try argv.append(allocator, link.out_path);
+
+    try runCommand(allocator, workspace_cwd, argv.items, max_output_bytes);
+}
+
+fn runCommand(
+    allocator: std.mem.Allocator,
+    workspace_cwd: []const u8,
+    argv: []const []const u8,
+    max_output_bytes: usize,
+) !void {
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv,
+        .cwd = workspace_cwd,
+        .max_output_bytes = max_output_bytes,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.ToolchainNotFound,
+        else => return err,
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| if (code != 0) return error.OperatorExecutionFailed,
+        else => return error.OperatorExecutionFailed,
+    }
+}
+
+fn requireZigExecutable(
+    allocator: std.mem.Allocator,
+    toolchain_root: ?[]const u8,
+    cache: *?[]u8,
+) ![]const u8 {
+    if (cache.*) |path| return path;
+    const root = toolchain_root orelse return error.ToolchainNotFound;
+    cache.* = try resolveZigExecutable(allocator, root);
+    return cache.*.?;
+}
+
+fn resolveZigExecutable(allocator: std.mem.Allocator, toolchain_root: []const u8) ![]u8 {
+    const is_windows = @import("builtin").os.tag == .windows;
+    const candidates = if (is_windows)
+        [_][]const u8{
+            "zig.exe",
+            "bin/zig.exe",
+        }
+    else
+        [_][]const u8{
+            "zig",
+            "bin/zig",
+        };
+
+    for (candidates) |rel| {
+        const candidate = try std.fs.path.join(allocator, &.{ toolchain_root, rel });
+        errdefer allocator.free(candidate);
+        if (try pathIsFile(candidate)) return candidate;
+        allocator.free(candidate);
+    }
+    return error.ToolchainNotFound;
+}
+
 fn pathExists(path: []const u8) !bool {
     std.fs.cwd().access(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
+    return true;
+}
+
+fn pathIsFile(path: []const u8) !bool {
+    var file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => return err,
+    };
+    file.close();
     return true;
 }
 
@@ -73,7 +204,7 @@ test "executeBuildGraph executes fs.copy inside workspace" {
     var build_spec: validator.BuildSpec = .{ .ops = ops };
     defer build_spec.deinit(allocator);
 
-    try executeBuildGraph(allocator, workspace_cwd, &build_spec);
+    try executeBuildGraph(allocator, workspace_cwd, &build_spec, .{});
 
     const out_path = try std.fs.path.join(allocator, &.{ workspace_cwd, "kilnexus-out/app" });
     defer allocator.free(out_path);
@@ -82,12 +213,20 @@ test "executeBuildGraph executes fs.copy inside workspace" {
     try std.testing.expectEqualStrings("int main(){return 0;}\n", out);
 }
 
-test "executeBuildGraph fails on unimplemented builtin operator" {
+test "executeBuildGraph reports missing toolchain for c.compile" {
     const allocator = std.testing.allocator;
     var ops = try allocator.alloc(validator.BuildOp, 1);
-    ops[0] = .c_compile;
+    ops[0] = .{
+        .c_compile = .{
+            .src_path = try allocator.dupe(u8, "src/main.c"),
+            .out_path = try allocator.dupe(u8, "obj/main.o"),
+        },
+    };
     var build_spec: validator.BuildSpec = .{ .ops = ops };
     defer build_spec.deinit(allocator);
 
-    try std.testing.expectError(error.OperatorExecutionFailed, executeBuildGraph(allocator, ".", &build_spec));
+    try std.testing.expectError(
+        error.ToolchainNotFound,
+        executeBuildGraph(allocator, ".", &build_spec, .{}),
+    );
 }

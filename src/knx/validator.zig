@@ -92,15 +92,40 @@ pub const FsCopyOp = struct {
     }
 };
 
+pub const CCompileOp = struct {
+    src_path: []u8,
+    out_path: []u8,
+
+    pub fn deinit(self: *CCompileOp, allocator: std.mem.Allocator) void {
+        allocator.free(self.src_path);
+        allocator.free(self.out_path);
+        self.* = undefined;
+    }
+};
+
+pub const ZigLinkOp = struct {
+    object_paths: [][]u8,
+    out_path: []u8,
+
+    pub fn deinit(self: *ZigLinkOp, allocator: std.mem.Allocator) void {
+        for (self.object_paths) |path| allocator.free(path);
+        allocator.free(self.object_paths);
+        allocator.free(self.out_path);
+        self.* = undefined;
+    }
+};
+
 pub const BuildOp = union(enum) {
     fs_copy: FsCopyOp,
-    c_compile,
-    zig_link,
+    c_compile: CCompileOp,
+    zig_link: ZigLinkOp,
     archive_pack,
 
     pub fn deinit(self: *BuildOp, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .fs_copy => |*copy| copy.deinit(allocator),
+            .c_compile => |*compile| compile.deinit(allocator),
+            .zig_link => |*link| link.deinit(allocator),
             else => {},
         }
         self.* = undefined;
@@ -319,11 +344,57 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
         }
 
         if (std.mem.eql(u8, op_name, "knx.c.compile")) {
-            try ops.append(allocator, .c_compile);
+            const src_text = try expectNonEmptyString(obj, "src");
+            const out_text = try expectNonEmptyString(obj, "out");
+            try validateWorkspaceRelativePath(src_text);
+            try validateWorkspaceRelativePath(out_text);
+
+            const src_path = try allocator.dupe(u8, src_text);
+            errdefer allocator.free(src_path);
+            const out_path = try allocator.dupe(u8, out_text);
+            errdefer allocator.free(out_path);
+
+            try ops.append(allocator, .{
+                .c_compile = .{
+                    .src_path = src_path,
+                    .out_path = out_path,
+                },
+            });
             continue;
         }
         if (std.mem.eql(u8, op_name, "knx.zig.link")) {
-            try ops.append(allocator, .zig_link);
+            const out_text = try expectNonEmptyString(obj, "out");
+            try validateWorkspaceRelativePath(out_text);
+            const objects = try expectArrayField(obj, "objects");
+            if (objects.items.len == 0) return error.ValueInvalid;
+
+            var object_paths_list: std.ArrayList([]u8) = .empty;
+            errdefer {
+                for (object_paths_list.items) |path| allocator.free(path);
+                object_paths_list.deinit(allocator);
+            }
+            for (objects.items, 0..) |obj_path_value, idx| {
+                _ = idx;
+                const path_text = try expectString(obj_path_value, "object path");
+                if (path_text.len == 0) return error.ValueInvalid;
+                try validateWorkspaceRelativePath(path_text);
+                try object_paths_list.append(allocator, try allocator.dupe(u8, path_text));
+            }
+            const object_paths = try object_paths_list.toOwnedSlice(allocator);
+            errdefer {
+                for (object_paths) |path| allocator.free(path);
+                allocator.free(object_paths);
+            }
+
+            const out_path = try allocator.dupe(u8, out_text);
+            errdefer allocator.free(out_path);
+
+            try ops.append(allocator, .{
+                .zig_link = .{
+                    .object_paths = object_paths,
+                    .out_path = out_path,
+                },
+            });
             continue;
         }
         if (std.mem.eql(u8, op_name, "knx.archive.pack")) {
@@ -812,6 +883,58 @@ test "parseBuildSpec parses fs.copy operation" {
         .fs_copy => |copy| {
             try std.testing.expectEqualStrings("src/main.c", copy.from_path);
             try std.testing.expectEqualStrings("kilnexus-out/app", copy.to_path);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parseBuildSpec parses c.compile and zig.link operations" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    { "op": "knx.c.compile", "src": "src/main.c", "out": "obj/main.o" },
+        \\    { "op": "knx.zig.link", "objects": ["obj/main.o"], "out": "kilnexus-out/app" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseBuildSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), spec.ops.len);
+    switch (spec.ops[0]) {
+        .c_compile => |compile| {
+            try std.testing.expectEqualStrings("src/main.c", compile.src_path);
+            try std.testing.expectEqualStrings("obj/main.o", compile.out_path);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (spec.ops[1]) {
+        .zig_link => |link| {
+            try std.testing.expectEqual(@as(usize, 1), link.object_paths.len);
+            try std.testing.expectEqualStrings("obj/main.o", link.object_paths[0]);
+            try std.testing.expectEqualStrings("kilnexus-out/app", link.out_path);
         },
         else => return error.TestUnexpectedResult,
     }

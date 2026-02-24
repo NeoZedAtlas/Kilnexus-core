@@ -169,6 +169,15 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         return err;
     };
     defer toolchain_spec.deinit(allocator);
+    const tree_hex = std.fmt.bytesToHex(toolchain_spec.tree_root, .lower);
+    const toolchain_tree_path = try std.fs.path.join(allocator, &.{
+        options.cache_root,
+        "cas",
+        "official",
+        "tree",
+        tree_hex[0..],
+    });
+    defer allocator.free(toolchain_tree_path);
     var workspace_spec = validator.parseWorkspaceSpecStrict(allocator, parsed.canonical_json) catch |err| {
         failed_at.* = .parse_knxfile;
         push(&trace, allocator, .failed) catch {};
@@ -288,7 +297,9 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         return err;
     };
     errdefer allocator.free(workspace_cwd);
-    build_executor.executeBuildGraph(allocator, workspace_cwd, &build_spec) catch |err| {
+    build_executor.executeBuildGraph(allocator, workspace_cwd, &build_spec, .{
+        .toolchain_root = toolchain_tree_path,
+    }) catch |err| {
         failed_at.* = .execute_build_graph;
         push(&trace, allocator, .failed) catch {};
         return err;
@@ -663,7 +674,7 @@ test "attemptRunWithOptions fails in execute stage when declared source is missi
     }
 }
 
-test "attemptRunWithOptions maps unimplemented builtin operator to build failure" {
+test "attemptRunWithOptions maps missing toolchain for c.compile to build failure" {
     const allocator = std.testing.allocator;
     const source =
         \\{
@@ -705,8 +716,8 @@ test "attemptRunWithOptions maps unimplemented builtin operator to build failure
         },
         .failure => |failure| {
             try std.testing.expectEqual(State.execute_build_graph, failure.at);
-            try std.testing.expectEqual(kx_error.Code.KX_BUILD_OPERATOR_FAILED, failure.code);
-            try std.testing.expectEqual(error.OperatorFailed, failure.cause);
+            try std.testing.expectEqual(kx_error.Code.KX_BUILD_TOOLCHAIN_MISSING, failure.code);
+            try std.testing.expectEqual(error.ToolchainMissing, failure.cause);
         },
     }
 }
