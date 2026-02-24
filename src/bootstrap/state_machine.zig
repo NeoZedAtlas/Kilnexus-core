@@ -4,6 +4,7 @@ const parse_errors = @import("../parser/parse_errors.zig");
 const validator = @import("../knx/validator.zig");
 const mini_tuf = @import("../trust/mini_tuf.zig");
 const kx_error = @import("../errors/kx_error.zig");
+const toolchain_installer = @import("toolchain_installer.zig");
 
 pub const State = enum {
     init,
@@ -155,15 +156,90 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         push(&trace, allocator, .failed) catch {};
         return err;
     };
+    var toolchain_spec = validator.parseToolchainSpecStrict(allocator, parsed.canonical_json) catch |err| {
+        failed_at.* = .parse_knxfile;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+    defer toolchain_spec.deinit(allocator);
     const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
 
+    var install_session: ?toolchain_installer.InstallSession = null;
+    if (toolchain_spec.source != null) {
+        install_session = toolchain_installer.InstallSession.init(allocator, &toolchain_spec, .{
+            .cache_root = ".kilnexus-cache",
+            .verify_mode = validation.verify_mode,
+        }) catch |err| {
+            failed_at.* = .resolve_toolchain;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+    defer if (install_session) |*session| session.deinit();
+
     try push(&trace, allocator, .resolve_toolchain);
+    if (install_session) |*session| {
+        session.resolveToolchain() catch |err| {
+            failed_at.* = .resolve_toolchain;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+
     try push(&trace, allocator, .download_blob);
+    if (install_session) |*session| {
+        session.downloadBlob() catch |err| {
+            failed_at.* = .download_blob;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+
     try push(&trace, allocator, .verify_blob);
+    if (install_session) |*session| {
+        session.verifyBlob() catch |err| {
+            failed_at.* = .verify_blob;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+
     try push(&trace, allocator, .unpack_staging);
+    if (install_session) |*session| {
+        session.unpackStaging() catch |err| {
+            failed_at.* = .unpack_staging;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+
     try push(&trace, allocator, .compute_tree_root);
+    if (install_session) |*session| {
+        session.computeTreeRoot() catch |err| {
+            failed_at.* = .compute_tree_root;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+
     try push(&trace, allocator, .verify_tree_root);
+    if (install_session) |*session| {
+        session.verifyTreeRoot() catch |err| {
+            failed_at.* = .verify_tree_root;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+
     try push(&trace, allocator, .seal_cache_object);
+    if (install_session) |*session| {
+        session.sealCacheObject() catch |err| {
+            failed_at.* = .seal_cache_object;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
+    }
+
     try push(&trace, allocator, .execute_build_graph);
     try push(&trace, allocator, .verify_outputs);
     try push(&trace, allocator, .atomic_publish);
@@ -339,6 +415,52 @@ test "attemptRunFromPathWithOptions returns canonical io cause for missing input
         },
         .failure => |failure| {
             try std.testing.expectEqual(State.init, failure.at);
+            try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
+            try std.testing.expectEqual(error.IoNotFound, failure.cause);
+        },
+    }
+}
+
+test "attemptRunWithOptions fails at download when source file is missing" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "source": "file://__missing_blob__.bin",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    const attempt = attemptRunWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+    });
+
+    switch (attempt) {
+        .success => |*result| {
+            defer result.deinit(allocator);
+            return error.ExpectedFailure;
+        },
+        .failure => |failure| {
+            try std.testing.expectEqual(State.download_blob, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
             try std.testing.expectEqual(error.IoNotFound, failure.cause);
         },

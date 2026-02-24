@@ -17,6 +17,20 @@ pub const ValidationSummary = struct {
     verify_mode: VerifyMode,
 };
 
+pub const ToolchainSpec = struct {
+    id: []u8,
+    source: ?[]u8,
+    blob_sha256: [32]u8,
+    tree_root: [32]u8,
+    size: u64,
+
+    pub fn deinit(self: *ToolchainSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        if (self.source) |source| allocator.free(source);
+        self.* = undefined;
+    }
+};
+
 pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []const u8) !ValidationSummary {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
     defer parsed.deinit();
@@ -72,6 +86,42 @@ pub fn validateCanonicalJsonStrict(allocator: std.mem.Allocator, canonical_json:
     return validateCanonicalJson(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
 }
 
+pub fn parseToolchainSpec(allocator: std.mem.Allocator, canonical_json: []const u8) !ToolchainSpec {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
+    defer parsed.deinit();
+
+    const root = try expectObject(parsed.value, "root");
+    const toolchain = try expectObjectField(root, "toolchain");
+
+    const id_text = try expectNonEmptyString(toolchain, "id");
+    const id = try allocator.dupe(u8, id_text);
+    errdefer allocator.free(id);
+
+    const blob_sha_text = try expectNonEmptyString(toolchain, "blob_sha256");
+    const tree_root_text = try expectNonEmptyString(toolchain, "tree_root");
+    const size_u64 = try parsePositiveU64(toolchain, "size");
+
+    var source_copy: ?[]u8 = null;
+    errdefer if (source_copy) |source| allocator.free(source);
+    if (toolchain.get("source")) |source_value| {
+        const source_text = try expectString(source_value, "source");
+        if (source_text.len == 0) return error.EmptyString;
+        source_copy = try allocator.dupe(u8, source_text);
+    }
+
+    return .{
+        .id = id,
+        .source = source_copy,
+        .blob_sha256 = try parseHexFixed(32, blob_sha_text),
+        .tree_root = try parseHexFixed(32, tree_root_text),
+        .size = size_u64,
+    };
+}
+
+pub fn parseToolchainSpecStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!ToolchainSpec {
+    return parseToolchainSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
+}
+
 pub fn computeKnxDigestHex(canonical_json: []const u8) [64]u8 {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(canonical_json, &digest, .{});
@@ -84,6 +134,13 @@ fn parseVerifyMode(policy: std.json.ObjectMap) !VerifyMode {
     if (std.mem.eql(u8, value, "strict")) return .strict;
     if (std.mem.eql(u8, value, "fast")) return .fast;
     return error.InvalidVerifyMode;
+}
+
+fn parsePositiveU64(object: std.json.ObjectMap, key: []const u8) !u64 {
+    const value = object.get(key) orelse return error.MissingRequiredField;
+    const number = try expectInteger(value, key);
+    if (number <= 0) return error.InvalidPositiveInt;
+    return @intCast(number);
 }
 
 fn expectVersion(root: std.json.ObjectMap) !void {
@@ -171,6 +228,15 @@ fn expectNonEmptyString(object: std.json.ObjectMap, key: []const u8) ![]const u8
     const string = try expectString(value, key);
     if (string.len == 0) return error.EmptyString;
     return string;
+}
+
+fn parseHexFixed(comptime byte_len: usize, text: []const u8) ![byte_len]u8 {
+    if (text.len != byte_len * 2) return error.InvalidHexLength;
+    var output: [byte_len]u8 = undefined;
+    _ = std.fmt.hexToBytes(&output, text) catch |err| switch (err) {
+        error.InvalidCharacter => return error.InvalidHexChar,
+    };
+    return output;
 }
 
 test "validateCanonicalJson accepts minimal valid knxfile" {
@@ -275,4 +341,41 @@ test "validateCanonicalJsonStrict normalizes policy errors" {
     ;
 
     try std.testing.expectError(error.ValueInvalid, validateCanonicalJsonStrict(allocator, json));
+}
+
+test "parseToolchainSpec extracts source and hashes" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "source": "file://tmp/toolchain.blob",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseToolchainSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqualStrings("zigcc-0.14.0", spec.id);
+    try std.testing.expect(spec.source != null);
+    try std.testing.expectEqualStrings("file://tmp/toolchain.blob", spec.source.?);
+    try std.testing.expectEqual(@as(u64, 1), spec.size);
 }
