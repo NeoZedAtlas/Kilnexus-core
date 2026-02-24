@@ -260,7 +260,8 @@ fn classifyByState(state: State, err: anyerror) kx_error.Code {
         .init => kx_error.classifyIo(err),
         .load_trust_metadata, .verify_metadata_chain => kx_error.classifyTrust(err),
         .parse_knxfile => kx_error.classifyParse(err),
-        .resolve_toolchain, .download_blob, .unpack_staging, .seal_cache_object => kx_error.classifyIo(err),
+        .resolve_toolchain, .download_blob, .seal_cache_object => kx_error.classifyIo(err),
+        .unpack_staging => classifyUnpack(err),
         .verify_blob => kx_error.classifyIntegrity(err),
         .compute_tree_root, .verify_tree_root => kx_error.classifyIntegrity(err),
         .execute_build_graph => kx_error.classifyBuild(err),
@@ -271,7 +272,8 @@ fn classifyByState(state: State, err: anyerror) kx_error.Code {
 
 fn normalizeCauseByState(state: State, err: anyerror) anyerror {
     return switch (state) {
-        .init, .resolve_toolchain, .download_blob, .unpack_staging, .seal_cache_object => kx_error.normalizeIo(err),
+        .init, .resolve_toolchain, .download_blob, .seal_cache_object => kx_error.normalizeIo(err),
+        .unpack_staging => normalizeUnpackCause(err),
         .load_trust_metadata, .verify_metadata_chain => mini_tuf.normalizeError(err),
         .parse_knxfile => parse_errors.normalize(err),
         .verify_blob, .compute_tree_root, .verify_tree_root => kx_error.normalizeIntegrity(err),
@@ -279,6 +281,18 @@ fn normalizeCauseByState(state: State, err: anyerror) anyerror {
         .verify_outputs, .atomic_publish => kx_error.normalizePublish(err),
         else => err,
     };
+}
+
+fn classifyUnpack(err: anyerror) kx_error.Code {
+    const integrity_code = kx_error.classifyIntegrity(err);
+    if (integrity_code != .KX_INTERNAL) return integrity_code;
+    return kx_error.classifyIo(err);
+}
+
+fn normalizeUnpackCause(err: anyerror) anyerror {
+    const integrity = kx_error.normalizeIntegrity(err);
+    if (integrity != error.Internal) return integrity;
+    return kx_error.normalizeIo(err);
 }
 
 fn push(trace: *std.ArrayList(State), allocator: std.mem.Allocator, state: State) !void {
@@ -399,6 +413,11 @@ test "attemptRunWithOptions maps integrity failure by error kind" {
 test "attemptRunWithOptions maps publish failure by error kind" {
     const mapped = classifyByState(.atomic_publish, normalizeCauseByState(.atomic_publish, error.FsyncFailed));
     try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped);
+}
+
+test "attemptRunWithOptions maps unpack traversal as integrity error" {
+    const mapped = classifyByState(.unpack_staging, normalizeCauseByState(.unpack_staging, error.PathTraversalDetected));
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped);
 }
 
 test "attemptRunFromPathWithOptions returns canonical io cause for missing input" {

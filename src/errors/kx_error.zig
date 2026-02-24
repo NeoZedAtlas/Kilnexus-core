@@ -439,7 +439,7 @@ pub fn normalizeIo(err: anyerror) IoError {
         return error.IoAlreadyExists;
     }
 
-    if (err == error.IoPathInvalid or err == error.NameTooLong or err == error.NotDir or err == error.InvalidUtf8 or err == error.InvalidWtf8 or err == error.BadPathName or err == error.SymLinkLoop) {
+    if (err == error.IoPathInvalid or err == error.NameTooLong or err == error.NotDir or err == error.InvalidUtf8 or err == error.InvalidWtf8 or err == error.BadPathName or err == error.SymLinkLoop or err == error.UnsupportedUriScheme or err == error.UriMissingHost or err == error.UriHostTooLong) {
         return error.IoPathInvalid;
     }
 
@@ -451,11 +451,11 @@ pub fn normalizeIo(err: anyerror) IoError {
         return error.IoRenameFailed;
     }
 
-    if (err == error.IoWriteFailed or err == error.ReadOnlyFileSystem or err == error.FileBusy) {
+    if (err == error.IoWriteFailed or err == error.ReadOnlyFileSystem or err == error.FileBusy or err == error.WriteFailed) {
         return error.IoWriteFailed;
     }
 
-    if (err == error.IoReadFailed or err == error.InputOutput or err == error.Unexpected) {
+    if (err == error.IoReadFailed or err == error.InputOutput or err == error.Unexpected or err == error.ConnectionTimedOut or err == error.ConnectionRefused or err == error.ConnectionResetByPeer or err == error.NetworkUnreachable or err == error.TemporaryNameServerFailure or err == error.NameServerFailure or err == error.UnknownHostName or err == error.HostLacksNetworkAddresses or err == error.UnexpectedConnectFailure or err == error.CertificateBundleLoadFailure or err == error.TlsInitializationFailed or err == error.HttpHeadersInvalid or err == error.HttpHeadersOversize or err == error.HttpChunkInvalid or err == error.HttpChunkTruncated or err == error.HttpRedirectLocationMissing or err == error.HttpRedirectLocationOversize or err == error.HttpRedirectLocationInvalid or err == error.TooManyHttpRedirects or err == error.RedirectRequiresResend or err == error.HttpContentEncodingUnsupported or err == error.ReadFailed) {
         return error.IoReadFailed;
     }
 
@@ -524,4 +524,5 @@ test "normalizeIo maps filesystem aliases" {
     try std.testing.expect(normalizeIo(error.FileNotFound) == error.IoNotFound);
     try std.testing.expect(normalizeIo(error.PermissionDenied) == error.IoAccessDenied);
     try std.testing.expect(normalizeIo(error.NoSpaceLeft) == error.IoNoSpace);
+    try std.testing.expect(normalizeIo(error.ConnectionTimedOut) == error.IoReadFailed);
 }
