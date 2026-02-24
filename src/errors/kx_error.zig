@@ -16,6 +16,13 @@ pub const Code = enum(u32) {
     KX_PARSE_SYNTAX = 1001,
     KX_PARSE_SCHEMA = 1002,
     KX_PARSE_CANONICAL = 1003,
+    KX_PARSE_EMPTY_INPUT = 1004,
+    KX_PARSE_MISSING_FIELD = 1005,
+    KX_PARSE_TYPE_MISMATCH = 1006,
+    KX_PARSE_VALUE_INVALID = 1007,
+    KX_PARSE_VERSION_UNSUPPORTED = 1008,
+    KX_PARSE_OPERATOR_DISALLOWED = 1009,
+    KX_PARSE_OUTPUT_INVALID = 1010,
 
     KX_TRUST_METADATA_MISSING = 2001,
     KX_TRUST_METADATA_MALFORMED = 2002,
@@ -30,9 +37,14 @@ pub const Code = enum(u32) {
     KX_TRUST_STATE_IO = 2011,
     KX_TRUST_STATE_INVALID = 2012,
 
-    KX_IO_READ = 3001,
-    KX_IO_WRITE = 3002,
-    KX_IO_RENAME = 3003,
+    KX_IO_NOT_FOUND = 3001,
+    KX_IO_ACCESS_DENIED = 3002,
+    KX_IO_PATH_INVALID = 3003,
+    KX_IO_READ_FAILED = 3004,
+    KX_IO_WRITE_FAILED = 3005,
+    KX_IO_NO_SPACE = 3006,
+    KX_IO_RENAME_FAILED = 3007,
+    KX_IO_ALREADY_EXISTS = 3008,
 
     KX_INTEGRITY_BLOB_MISMATCH = 4001,
     KX_INTEGRITY_TREE_MISMATCH = 4002,
@@ -54,6 +66,13 @@ pub fn describe(code: Code) Descriptor {
         .KX_PARSE_SYNTAX => .{ .family = .parse, .summary = "invalid syntax in lockfile" },
         .KX_PARSE_SCHEMA => .{ .family = .parse, .summary = "lockfile schema validation failed" },
         .KX_PARSE_CANONICAL => .{ .family = .parse, .summary = "lockfile canonicalization failed" },
+        .KX_PARSE_EMPTY_INPUT => .{ .family = .parse, .summary = "lockfile is empty or whitespace only" },
+        .KX_PARSE_MISSING_FIELD => .{ .family = .parse, .summary = "required lockfile field missing" },
+        .KX_PARSE_TYPE_MISMATCH => .{ .family = .parse, .summary = "lockfile field type mismatch" },
+        .KX_PARSE_VALUE_INVALID => .{ .family = .parse, .summary = "lockfile field value invalid" },
+        .KX_PARSE_VERSION_UNSUPPORTED => .{ .family = .parse, .summary = "lockfile version unsupported" },
+        .KX_PARSE_OPERATOR_DISALLOWED => .{ .family = .parse, .summary = "lockfile contains disallowed operator" },
+        .KX_PARSE_OUTPUT_INVALID => .{ .family = .parse, .summary = "lockfile output mapping invalid" },
 
         .KX_TRUST_METADATA_MISSING => .{ .family = .trust, .summary = "required trust metadata missing" },
         .KX_TRUST_METADATA_MALFORMED => .{ .family = .trust, .summary = "trust metadata JSON is malformed or missing required fields" },
@@ -68,9 +87,14 @@ pub fn describe(code: Code) Descriptor {
         .KX_TRUST_STATE_IO => .{ .family = .trust, .summary = "trust state persistence IO failed" },
         .KX_TRUST_STATE_INVALID => .{ .family = .trust, .summary = "trust state file is malformed or invalid" },
 
-        .KX_IO_READ => .{ .family = .io, .summary = "file read failed" },
-        .KX_IO_WRITE => .{ .family = .io, .summary = "file write failed" },
-        .KX_IO_RENAME => .{ .family = .io, .summary = "atomic rename failed" },
+        .KX_IO_NOT_FOUND => .{ .family = .io, .summary = "path or file not found" },
+        .KX_IO_ACCESS_DENIED => .{ .family = .io, .summary = "access denied for filesystem operation" },
+        .KX_IO_PATH_INVALID => .{ .family = .io, .summary = "path is invalid for filesystem operation" },
+        .KX_IO_READ_FAILED => .{ .family = .io, .summary = "file read failed" },
+        .KX_IO_WRITE_FAILED => .{ .family = .io, .summary = "file write failed" },
+        .KX_IO_NO_SPACE => .{ .family = .io, .summary = "no space or disk quota left" },
+        .KX_IO_RENAME_FAILED => .{ .family = .io, .summary = "atomic rename failed" },
+        .KX_IO_ALREADY_EXISTS => .{ .family = .io, .summary = "target path already exists" },
 
         .KX_INTEGRITY_BLOB_MISMATCH => .{ .family = .integrity, .summary = "blob integrity mismatch" },
         .KX_INTEGRITY_TREE_MISMATCH => .{ .family = .integrity, .summary = "tree integrity mismatch" },
@@ -146,10 +170,31 @@ pub fn classifyTrust(err: anyerror) Code {
 }
 
 pub fn classifyParse(err: anyerror) Code {
-    if (err == error.Parse) return .KX_PARSE_SYNTAX;
+    if (err == error.Parse) return .KX_PARSE_EMPTY_INPUT;
+    if (err == error.Schema) return .KX_PARSE_SYNTAX;
 
-    if (err == error.Schema or err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger or err == error.MissingRequiredField or err == error.MissingVersion or err == error.UnsupportedVersion or err == error.InvalidHexLength or err == error.InvalidHexChar or err == error.InvalidPositiveInt or err == error.InvalidPolicyNetwork or err == error.InvalidPolicyClock or err == error.InvalidEnvTZ or err == error.InvalidEnvLang or err == error.InvalidDigits or err == error.InvalidMode or err == error.OutputsEmpty or err == error.InvalidOutputPath or err == error.OperatorNotAllowed or err == error.InvalidVerifyMode or err == error.EmptyString) {
-        return .KX_PARSE_SCHEMA;
+    if (err == error.MissingRequiredField or err == error.MissingVersion) {
+        return .KX_PARSE_MISSING_FIELD;
+    }
+
+    if (err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger) {
+        return .KX_PARSE_TYPE_MISMATCH;
+    }
+
+    if (err == error.UnsupportedVersion) {
+        return .KX_PARSE_VERSION_UNSUPPORTED;
+    }
+
+    if (err == error.OperatorNotAllowed) {
+        return .KX_PARSE_OPERATOR_DISALLOWED;
+    }
+
+    if (err == error.OutputsEmpty or err == error.InvalidOutputPath or err == error.InvalidMode) {
+        return .KX_PARSE_OUTPUT_INVALID;
+    }
+
+    if (err == error.InvalidHexLength or err == error.InvalidHexChar or err == error.InvalidPositiveInt or err == error.InvalidPolicyNetwork or err == error.InvalidPolicyClock or err == error.InvalidEnvTZ or err == error.InvalidEnvLang or err == error.InvalidDigits or err == error.InvalidVerifyMode or err == error.EmptyString) {
+        return .KX_PARSE_VALUE_INVALID;
     }
 
     if (err == error.UnsupportedFloatInCanonicalization or err == error.InvalidCanonicalObject) return .KX_PARSE_CANONICAL;
@@ -158,15 +203,31 @@ pub fn classifyParse(err: anyerror) Code {
 }
 
 pub fn classifyIo(err: anyerror) Code {
-    if (err == error.FileNotFound or err == error.AccessDenied or err == error.PathAlreadyExists or err == error.NameTooLong or err == error.NotDir or err == error.InvalidUtf8 or err == error.InvalidWtf8) {
-        return .KX_IO_READ;
+    if (err == error.FileNotFound) return .KX_IO_NOT_FOUND;
+
+    if (err == error.AccessDenied or err == error.PermissionDenied) {
+        return .KX_IO_ACCESS_DENIED;
     }
 
-    if (err == error.ReadOnlyFileSystem or err == error.DiskQuota or err == error.NoSpaceLeft or err == error.InputOutput) {
-        return .KX_IO_WRITE;
+    if (err == error.PathAlreadyExists) return .KX_IO_ALREADY_EXISTS;
+
+    if (err == error.NameTooLong or err == error.NotDir or err == error.InvalidUtf8 or err == error.InvalidWtf8 or err == error.BadPathName or err == error.SymLinkLoop) {
+        return .KX_IO_PATH_INVALID;
     }
 
-    if (err == error.RenameAcrossMountPoints or err == error.PathAlreadyExists) return .KX_IO_RENAME;
+    if (err == error.DiskQuota or err == error.NoSpaceLeft) {
+        return .KX_IO_NO_SPACE;
+    }
+
+    if (err == error.RenameAcrossMountPoints) return .KX_IO_RENAME_FAILED;
+
+    if (err == error.ReadOnlyFileSystem or err == error.FileBusy) {
+        return .KX_IO_WRITE_FAILED;
+    }
+
+    if (err == error.InputOutput or err == error.Unexpected) {
+        return .KX_IO_READ_FAILED;
+    }
 
     return .KX_INTERNAL;
 }
@@ -182,12 +243,18 @@ test "classifyTrust maps signature and policy details" {
 }
 
 test "classifyParse maps schema and syntax" {
-    try std.testing.expectEqual(Code.KX_PARSE_SYNTAX, classifyParse(error.Parse));
-    try std.testing.expectEqual(Code.KX_PARSE_SCHEMA, classifyParse(error.InvalidPolicyNetwork));
+    try std.testing.expectEqual(Code.KX_PARSE_EMPTY_INPUT, classifyParse(error.Parse));
+    try std.testing.expectEqual(Code.KX_PARSE_SYNTAX, classifyParse(error.Schema));
+    try std.testing.expectEqual(Code.KX_PARSE_VALUE_INVALID, classifyParse(error.InvalidPolicyNetwork));
 }
 
 test "buildErrorId is stable" {
     var buf: [96]u8 = undefined;
     const id = buildErrorId(&buf, .KX_TRUST_METADATA_MISSING, "load_trust_metadata", "FileNotFound");
     try std.testing.expectEqualStrings("kx:2001:load_trust_metadata:FileNotFound", id);
+}
+
+test "classifyIo maps not-found and no-space" {
+    try std.testing.expectEqual(Code.KX_IO_NOT_FOUND, classifyIo(error.FileNotFound));
+    try std.testing.expectEqual(Code.KX_IO_NO_SPACE, classifyIo(error.NoSpaceLeft));
 }

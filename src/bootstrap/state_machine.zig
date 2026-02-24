@@ -285,7 +285,7 @@ test "attemptRunWithOptions returns structured parse error" {
         },
         .failure => |failure| {
             try std.testing.expectEqual(State.parse_knxfile, failure.at);
-            try std.testing.expectEqual(kx_error.Code.KX_PARSE_SCHEMA, failure.code);
+            try std.testing.expectEqual(kx_error.Code.KX_PARSE_SYNTAX, failure.code);
             try std.testing.expectEqual(error.Schema, failure.cause);
         },
     }
