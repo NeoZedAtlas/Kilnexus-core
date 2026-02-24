@@ -1,5 +1,6 @@
 const std = @import("std");
 const bootstrap = @import("bootstrap/state_machine.zig");
+const kx_error = @import("errors/kx_error.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -21,27 +22,46 @@ pub fn main() !void {
     const path = args.next() orelse "Knxfile";
     const trust_dir = args.next() orelse "trust";
 
-    var run_result = try bootstrap.runFromPathWithOptions(allocator, path, .{
+    var attempt = bootstrap.attemptRunFromPathWithOptions(allocator, path, .{
         .trust_metadata_dir = trust_dir,
         .trust_state_path = ".kilnexus-trust-state.json",
     });
-    defer run_result.deinit(allocator);
 
-    std.debug.print("Bootstrap completed with state: {s}\n", .{@tagName(run_result.final_state)});
-    std.debug.print(
-        "Trust versions root/timestamp/snapshot/targets: {d}/{d}/{d}/{d}\n",
-        .{
-            run_result.trust.root_version,
-            run_result.trust.timestamp_version,
-            run_result.trust.snapshot_version,
-            run_result.trust.targets_version,
+    switch (attempt) {
+        .success => |*run_result| {
+            defer run_result.deinit(allocator);
+            std.debug.print("Bootstrap completed with state: {s}\n", .{@tagName(run_result.final_state)});
+            std.debug.print(
+                "Trust versions root/timestamp/snapshot/targets: {d}/{d}/{d}/{d}\n",
+                .{
+                    run_result.trust.root_version,
+                    run_result.trust.timestamp_version,
+                    run_result.trust.snapshot_version,
+                    run_result.trust.targets_version,
+                },
+            );
+            std.debug.print("Verify mode: {s}\n", .{@tagName(run_result.verify_mode)});
+            std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
+            std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});
+
+            for (run_result.trace.items) |state| {
+                std.debug.print(" - {s}\n", .{@tagName(state)});
+            }
         },
-    );
-    std.debug.print("Verify mode: {s}\n", .{@tagName(run_result.verify_mode)});
-    std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
-    std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});
-
-    for (run_result.trace.items) |state| {
-        std.debug.print(" - {s}\n", .{@tagName(state)});
+        .failure => |failure| {
+            const descriptor = kx_error.describe(failure.code);
+            std.debug.print(
+                "{{\"status\":\"failed\",\"code\":\"{s}\",\"code_num\":{d},\"family\":\"{s}\",\"state\":\"{s}\",\"cause\":\"{s}\",\"summary\":\"{s}\"}}\n",
+                .{
+                    @tagName(failure.code),
+                    @intFromEnum(failure.code),
+                    @tagName(descriptor.family),
+                    @tagName(failure.at),
+                    @errorName(failure.cause),
+                    descriptor.summary,
+                },
+            );
+            return error.BootstrapFailed;
+        },
     }
 }

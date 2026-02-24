@@ -2,6 +2,7 @@ const std = @import("std");
 const abi_parser = @import("../parser/abi_parser.zig");
 const validator = @import("../knx/validator.zig");
 const mini_tuf = @import("../trust/mini_tuf.zig");
+const kx_error = @import("../errors/kx_error.zig");
 
 pub const State = enum {
     init,
@@ -37,6 +38,17 @@ pub const RunResult = struct {
     }
 };
 
+pub const RunFailure = struct {
+    at: State,
+    code: kx_error.Code,
+    cause: anyerror,
+};
+
+pub const RunAttempt = union(enum) {
+    success: RunResult,
+    failure: RunFailure,
+};
+
 const max_knxfile_bytes: usize = 4 * 1024 * 1024;
 
 pub fn runFromPath(allocator: std.mem.Allocator, path: []const u8) !RunResult {
@@ -51,7 +63,8 @@ pub const RunOptions = struct {
 pub fn runFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) !RunResult {
     const source = try std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes);
     defer allocator.free(source);
-    return runWithOptions(allocator, source, options);
+    var failed_at: State = .init;
+    return runWithOptionsCore(allocator, source, options, &failed_at);
 }
 
 pub fn run(allocator: std.mem.Allocator, source: []const u8) !RunResult {
@@ -62,8 +75,42 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8) !RunResult {
 }
 
 pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) !RunResult {
+    var failed_at: State = .init;
+    return runWithOptionsCore(allocator, source, options, &failed_at);
+}
+
+pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) RunAttempt {
+    const source = std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes) catch |err| {
+        return .{
+            .failure = .{
+                .at = .init,
+                .code = kx_error.classifyIo(err),
+                .cause = err,
+            },
+        };
+    };
+    defer allocator.free(source);
+    return attemptRunWithOptions(allocator, source, options);
+}
+
+pub fn attemptRunWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) RunAttempt {
+    var failed_at: State = .init;
+    const result = runWithOptionsCore(allocator, source, options, &failed_at) catch |err| {
+        return .{
+            .failure = .{
+                .at = failed_at,
+                .code = classifyByState(failed_at, err),
+                .cause = err,
+            },
+        };
+    };
+    return .{ .success = result };
+}
+
+fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options: RunOptions, failed_at: *State) !RunResult {
     var trace: std.ArrayList(State) = .empty;
     errdefer trace.deinit(allocator);
+    failed_at.* = .init;
 
     try push(&trace, allocator, .init);
     try push(&trace, allocator, .load_trust_metadata);
@@ -75,7 +122,8 @@ pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options:
     };
     if (options.trust_metadata_dir) |trust_dir_path| {
         var bundle = mini_tuf.loadFromDir(allocator, trust_dir_path) catch |err| {
-            try push(&trace, allocator, .failed);
+            failed_at.* = .load_trust_metadata;
+            push(&trace, allocator, .failed) catch {};
             return err;
         };
         defer bundle.deinit(allocator);
@@ -84,7 +132,8 @@ pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options:
         trust_summary = mini_tuf.verify(allocator, &bundle, .{
             .state_path = options.trust_state_path,
         }) catch |err| {
-            try push(&trace, allocator, .failed);
+            failed_at.* = .verify_metadata_chain;
+            push(&trace, allocator, .failed) catch {};
             return err;
         };
     } else {
@@ -93,12 +142,14 @@ pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options:
     try push(&trace, allocator, .parse_knxfile);
 
     const parsed = abi_parser.parseLockfile(allocator, source) catch |err| {
-        try push(&trace, allocator, .failed);
+        failed_at.* = .parse_knxfile;
+        push(&trace, allocator, .failed) catch {};
         return err;
     };
     errdefer allocator.free(parsed.canonical_json);
     const validation = validator.validateCanonicalJson(allocator, parsed.canonical_json) catch |err| {
-        try push(&trace, allocator, .failed);
+        failed_at.* = .parse_knxfile;
+        push(&trace, allocator, .failed) catch {};
         return err;
     };
     const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
@@ -122,6 +173,20 @@ pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options:
         .knx_digest_hex = knx_digest_hex,
         .trust = trust_summary,
         .final_state = .done,
+    };
+}
+
+fn classifyByState(state: State, err: anyerror) kx_error.Code {
+    return switch (state) {
+        .init => kx_error.classifyIo(err),
+        .load_trust_metadata, .verify_metadata_chain => kx_error.classifyTrust(err),
+        .parse_knxfile => kx_error.classifyParse(err),
+        .resolve_toolchain, .download_blob, .unpack_staging, .seal_cache_object => kx_error.classifyIo(err),
+        .verify_blob => .KX_INTEGRITY_BLOB_MISMATCH,
+        .compute_tree_root, .verify_tree_root => .KX_INTEGRITY_TREE_MISMATCH,
+        .execute_build_graph => .KX_BUILD_OPERATOR_FAILED,
+        .verify_outputs, .atomic_publish => .KX_PUBLISH_ATOMIC,
+        else => .KX_INTERNAL,
     };
 }
 
@@ -202,4 +267,26 @@ test "run fails on policy violation" {
         \\}
     ;
     try std.testing.expectError(error.InvalidPolicyNetwork, run(allocator, source));
+}
+
+test "attemptRunWithOptions returns structured parse error" {
+    const allocator = std.testing.allocator;
+    const source = "version=1";
+
+    const attempt = attemptRunWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+    });
+
+    switch (attempt) {
+        .success => |*result| {
+            defer result.deinit(allocator);
+            return error.ExpectedFailure;
+        },
+        .failure => |failure| {
+            try std.testing.expectEqual(State.parse_knxfile, failure.at);
+            try std.testing.expectEqual(kx_error.Code.KX_PARSE_SCHEMA, failure.code);
+            try std.testing.expectEqual(error.Schema, failure.cause);
+        },
+    }
 }
