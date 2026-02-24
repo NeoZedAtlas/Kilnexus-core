@@ -235,6 +235,8 @@ fn parseHexFixed(comptime byte_len: usize, text: []const u8) ![byte_len]u8 {
     var output: [byte_len]u8 = undefined;
     _ = std.fmt.hexToBytes(&output, text) catch |err| switch (err) {
         error.InvalidCharacter => return error.InvalidHexChar,
+        error.InvalidLength => return error.InvalidHexLength,
+        error.NoSpaceLeft => return error.InvalidHexLength,
     };
     return output;
 }

@@ -101,10 +101,10 @@ pub const InstallSession = struct {
                 }
                 try std.fs.cwd().copyFile(source_path, std.fs.cwd(), self.blob_path, .{});
             },
-            .https_url => |url| try self.downloadHttpWithRetries(url, hard_cap),
+            .https_url => |url| try downloadHttpWithRetries(self, url, hard_cap),
             .http_url => |url| {
                 if (!self.allow_insecure_http_source) return error.AccessDenied;
-                try self.downloadHttpWithRetries(url, hard_cap);
+                try downloadHttpWithRetries(self, url, hard_cap);
             },
         }
     }
@@ -223,12 +223,12 @@ fn parseSource(source: []const u8) !Source {
 fn downloadHttpWithRetries(self: *InstallSession, url: []const u8, hard_cap: u64) !void {
     var attempt: u8 = 0;
     while (attempt < self.download_attempts) : (attempt += 1) {
-        self.downloadHttpAttempt(url, hard_cap) catch |err| {
+        downloadHttpAttempt(self, url, hard_cap) catch |err| {
             if (attempt + 1 >= self.download_attempts or !isRetryableDownloadError(err)) {
                 return err;
             }
             const backoff_ms = @as(u64, 200) * (@as(u64, attempt) + 1);
-            std.time.sleep(backoff_ms * std.time.ns_per_ms);
+            std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
             continue;
         };
         return;
@@ -400,10 +400,8 @@ fn detectBlobFormat(blob_file: *std.fs.File) !BlobFormat {
 }
 
 fn isTarHeader(bytes: []const u8) bool {
-    if (bytes.len < std.tar.Header.SIZE) return false;
-    const header: std.tar.Header = .{ .bytes = bytes[0..std.tar.Header.SIZE] };
-    const checksum = header.checkChksum() catch return false;
-    return checksum != 0;
+    if (bytes.len < 263) return false;
+    return std.mem.eql(u8, bytes[257..262], "ustar");
 }
 
 fn extractTarArchive(dir: *std.fs.Dir, reader: *std.Io.Reader) !void {
@@ -548,7 +546,10 @@ fn pathIsFile(path: []const u8) !bool {
 }
 
 fn makeReadOnlyRecursively(allocator: std.mem.Allocator, root_path: []const u8) !void {
-    if (builtin.os.tag == .windows) return;
+    if (builtin.os.tag == .windows) {
+        try tightenWindowsAcl(allocator, root_path);
+        return;
+    }
 
     var root = try std.fs.cwd().openDir(root_path, .{ .iterate = true });
     defer root.close();
@@ -573,6 +574,55 @@ fn makeReadOnlyRecursively(allocator: std.mem.Allocator, root_path: []const u8) 
     }
 
     root.chmod(0o555) catch {};
+}
+
+fn tightenWindowsAcl(allocator: std.mem.Allocator, root_path: []const u8) !void {
+    const icacls_exe = try resolveIcaclsPath(allocator);
+    defer allocator.free(icacls_exe);
+
+    const result = std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = &.{
+            icacls_exe,
+            root_path,
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)(RX)",
+            "*S-1-5-32-544:(OI)(CI)(RX)",
+            "*S-1-5-11:(OI)(CI)(RX)",
+            "/T",
+            "/C",
+            "/Q",
+        },
+        .max_output_bytes = 64 * 1024,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.FileNotFound,
+        error.AccessDenied => return error.AccessDenied,
+        else => return error.Unexpected,
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| {
+            if (code != 0) return error.AccessDenied;
+        },
+        else => return error.AccessDenied,
+    }
+}
+
+fn resolveIcaclsPath(allocator: std.mem.Allocator) ![]u8 {
+    const win_dir = std.process.getEnvVarOwned(allocator, "WINDIR") catch {
+        return allocator.dupe(u8, "icacls");
+    };
+    defer allocator.free(win_dir);
+
+    const candidate = try std.fs.path.join(allocator, &.{ win_dir, "System32", "icacls.exe" });
+    if (pathIsFile(candidate) catch false) {
+        return candidate;
+    }
+    allocator.free(candidate);
+    return allocator.dupe(u8, "icacls");
 }
 
 test "install session materializes and seals local blob source" {
