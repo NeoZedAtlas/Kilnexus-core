@@ -1,4 +1,5 @@
 const std = @import("std");
+const parse_errors = @import("../parser/parse_errors.zig");
 
 const allowed_operators = [_][]const u8{
     "knx.c.compile",
@@ -65,6 +66,10 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
     }
 
     return .{ .verify_mode = verify_mode };
+}
+
+pub fn validateCanonicalJsonStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!ValidationSummary {
+    return validateCanonicalJson(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
 }
 
 pub fn computeKnxDigestHex(canonical_json: []const u8) [64]u8 {
@@ -240,4 +245,34 @@ test "validateCanonicalJson rejects custom operator" {
 test "computeKnxDigestHex is stable length" {
     const hex = computeKnxDigestHex("{\"version\":1}");
     try std.testing.expectEqual(@as(usize, 64), hex.len);
+}
+
+test "validateCanonicalJsonStrict normalizes policy errors" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "on",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.ValueInvalid, validateCanonicalJsonStrict(allocator, json));
 }

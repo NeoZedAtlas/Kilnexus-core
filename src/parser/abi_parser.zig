@@ -1,4 +1,5 @@
 const std = @import("std");
+const parse_errors = @import("parse_errors.zig");
 
 const c = @cImport({
     @cInclude("kx_parser.h");
@@ -36,6 +37,14 @@ pub fn parseLockfile(allocator: std.mem.Allocator, input: []const u8) !ParseResu
     }
 }
 
+pub fn parseLockfileStrict(allocator: std.mem.Allocator, input: []const u8) parse_errors.ParseError!ParseResult {
+    if (std.mem.trim(u8, input, " \t\r\n").len == 0) {
+        return error.EmptyInput;
+    }
+
+    return parseLockfile(allocator, input) catch |err| return parse_errors.normalize(err);
+}
+
 test "parseLockfile normalizes CRLF and trims outer whitespace" {
     const allocator = std.testing.allocator;
     const source =
@@ -62,4 +71,9 @@ test "parseLockfile handles buffer growth" {
 
     try std.testing.expect(parsed.canonical_json.len > 64);
     try std.testing.expectEqualStrings(long_source, parsed.canonical_json);
+}
+
+test "parseLockfileStrict rejects empty input" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.EmptyInput, parseLockfileStrict(allocator, "   \r\n"));
 }

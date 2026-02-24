@@ -27,13 +27,42 @@ pub const VerificationSummary = struct {
     targets_version: u64,
 };
 
+pub const TrustError = error{
+    MetadataMissing,
+    MetadataMalformed,
+    RolePolicyInvalid,
+    KeyUnsupported,
+    SignatureInvalid,
+    SignatureThresholdNotMet,
+    MetadataExpired,
+    RollbackDetected,
+    VersionLinkMismatch,
+    VersionInvalid,
+    StateIo,
+    StateInvalid,
+    Internal,
+};
+
 pub fn loadFromDir(allocator: std.mem.Allocator, trust_dir_path: []const u8) !MetadataBundle {
+    const root_json = try readRoleFromDir(allocator, trust_dir_path, "root.json");
+    errdefer allocator.free(root_json);
+    const timestamp_json = try readRoleFromDir(allocator, trust_dir_path, "timestamp.json");
+    errdefer allocator.free(timestamp_json);
+    const snapshot_json = try readRoleFromDir(allocator, trust_dir_path, "snapshot.json");
+    errdefer allocator.free(snapshot_json);
+    const targets_json = try readRoleFromDir(allocator, trust_dir_path, "targets.json");
+    errdefer allocator.free(targets_json);
+
     return .{
-        .root_json = try readRoleFromDir(allocator, trust_dir_path, "root.json"),
-        .timestamp_json = try readRoleFromDir(allocator, trust_dir_path, "timestamp.json"),
-        .snapshot_json = try readRoleFromDir(allocator, trust_dir_path, "snapshot.json"),
-        .targets_json = try readRoleFromDir(allocator, trust_dir_path, "targets.json"),
+        .root_json = root_json,
+        .timestamp_json = timestamp_json,
+        .snapshot_json = snapshot_json,
+        .targets_json = targets_json,
     };
+}
+
+pub fn loadFromDirStrict(allocator: std.mem.Allocator, trust_dir_path: []const u8) TrustError!MetadataBundle {
+    return loadFromDir(allocator, trust_dir_path) catch |err| return normalizeError(err);
 }
 
 pub fn verify(allocator: std.mem.Allocator, bundle: *const MetadataBundle, options: VerifyOptions) !VerificationSummary {
@@ -75,11 +104,65 @@ pub fn verify(allocator: std.mem.Allocator, bundle: *const MetadataBundle, optio
     return summary;
 }
 
+pub fn verifyStrict(allocator: std.mem.Allocator, bundle: *const MetadataBundle, options: VerifyOptions) TrustError!VerificationSummary {
+    return verify(allocator, bundle, options) catch |err| return normalizeError(err);
+}
+
 pub fn enforceRollback(previous: VerificationSummary, current: VerificationSummary) !void {
     if (current.root_version < previous.root_version) return error.RollbackDetected;
     if (current.timestamp_version < previous.timestamp_version) return error.RollbackDetected;
     if (current.snapshot_version < previous.snapshot_version) return error.RollbackDetected;
     if (current.targets_version < previous.targets_version) return error.RollbackDetected;
+}
+
+pub fn normalizeError(err: anyerror) TrustError {
+    if (err == error.MetadataMissing or err == error.FileNotFound) {
+        return error.MetadataMissing;
+    }
+
+    if (err == error.MetadataMalformed or err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger or err == error.MissingRequiredField or err == error.MissingSignedSection or err == error.MissingSignaturesSection) {
+        return error.MetadataMalformed;
+    }
+
+    if (err == error.RolePolicyInvalid or err == error.MissingRoleRule or err == error.InvalidRoleType or err == error.InvalidThreshold or err == error.EmptyRoleKeyIds or err == error.EmptyRoleKeyId or err == error.InvalidSignatureEntry or err == error.EmptySignatures) {
+        return error.RolePolicyInvalid;
+    }
+
+    if (err == error.KeyUnsupported or err == error.UnsupportedKeyType or err == error.UnsupportedSignatureScheme) {
+        return error.KeyUnsupported;
+    }
+
+    if (err == error.SignatureInvalid or err == error.SignatureVerificationFailed or err == error.EncodingError or err == error.IdentityElement or err == error.WeakPublicKey or err == error.NonCanonical or err == error.InvalidHexLength or err == error.InvalidCharacter) {
+        return error.SignatureInvalid;
+    }
+
+    if (err == error.SignatureThresholdNotMet) {
+        return error.SignatureThresholdNotMet;
+    }
+
+    if (err == error.MetadataExpired or err == error.InvalidTimestampFormat or err == error.InvalidTimestampYear or err == error.InvalidTimestampMonth or err == error.InvalidTimestampDay or err == error.InvalidTimestampClock) {
+        return error.MetadataExpired;
+    }
+
+    if (err == error.RollbackDetected) return error.RollbackDetected;
+
+    if (err == error.VersionLinkMismatch or err == error.LinkedMetadataVersionMismatch or err == error.InvalidLinkedVersion or err == error.MissingLinkedMetadata) {
+        return error.VersionLinkMismatch;
+    }
+
+    if (err == error.VersionInvalid or err == error.InvalidMetadataVersion) {
+        return error.VersionInvalid;
+    }
+
+    if (err == error.StateInvalid or err == error.InvalidStateVersion) {
+        return error.StateInvalid;
+    }
+
+    if (err == error.StateIo or err == error.AccessDenied or err == error.PermissionDenied or err == error.ReadOnlyFileSystem or err == error.NoSpaceLeft or err == error.DiskQuota or err == error.FileBusy or err == error.InputOutput or err == error.RenameAcrossMountPoints) {
+        return error.StateIo;
+    }
+
+    return error.Internal;
 }
 
 const max_role_file_bytes: usize = 2 * 1024 * 1024;
@@ -565,6 +648,12 @@ test "verify rejects rollback" {
         .targets_version = 3,
     };
     try std.testing.expectError(error.RollbackDetected, enforceRollback(previous, current));
+}
+
+test "normalizeError maps raw errors into canonical trust errors" {
+    try std.testing.expect(normalizeError(error.InvalidThreshold) == error.RolePolicyInvalid);
+    try std.testing.expect(normalizeError(error.InvalidTimestampFormat) == error.MetadataExpired);
+    try std.testing.expect(normalizeError(error.InvalidStateVersion) == error.StateInvalid);
 }
 
 test "parseIso8601Utc validates format and value" {

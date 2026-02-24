@@ -74,6 +74,35 @@ pub const Descriptor = struct {
     summary: []const u8,
 };
 
+pub const IntegrityError = error{
+    BlobMismatch,
+    TreeMismatch,
+    SizeMismatch,
+    HashUnsupported,
+    PathTraversal,
+    SymlinkPolicy,
+    Internal,
+};
+
+pub const BuildError = error{
+    OperatorFailed,
+    OperatorDisallowed,
+    ToolchainMissing,
+    SandboxViolation,
+    GraphInvalid,
+    Timeout,
+    Internal,
+};
+
+pub const PublishError = error{
+    AtomicFailed,
+    OutputMissing,
+    OutputHashMismatch,
+    FsyncFailed,
+    PermissionDenied,
+    Internal,
+};
+
 pub fn describe(code: Code) Descriptor {
     return switch (code) {
         .KX_OK => .{ .family = .internal, .summary = "ok" },
@@ -148,23 +177,23 @@ pub fn buildErrorId(
 }
 
 pub fn classifyTrust(err: anyerror) Code {
-    if (err == error.FileNotFound) {
+    if (err == error.MetadataMissing) {
         return .KX_TRUST_METADATA_MISSING;
     }
 
-    if (err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger or err == error.MissingRequiredField or err == error.MissingSignedSection or err == error.MissingSignaturesSection) {
+    if (err == error.MetadataMalformed) {
         return .KX_TRUST_METADATA_MALFORMED;
     }
 
-    if (err == error.MissingRoleRule or err == error.InvalidRoleType or err == error.InvalidThreshold or err == error.EmptyRoleKeyIds or err == error.EmptyRoleKeyId or err == error.InvalidSignatureEntry) {
+    if (err == error.RolePolicyInvalid) {
         return .KX_TRUST_ROLE_POLICY;
     }
 
-    if (err == error.UnsupportedKeyType or err == error.UnsupportedSignatureScheme) {
+    if (err == error.KeyUnsupported) {
         return .KX_TRUST_KEY_UNSUPPORTED;
     }
 
-    if (err == error.SignatureVerificationFailed or err == error.EncodingError or err == error.IdentityElement or err == error.WeakPublicKey or err == error.NonCanonical or err == error.InvalidHexLength or err == error.InvalidCharacter) {
+    if (err == error.SignatureInvalid) {
         return .KX_TRUST_SIGNATURE_INVALID;
     }
 
@@ -172,25 +201,25 @@ pub fn classifyTrust(err: anyerror) Code {
         return .KX_TRUST_SIGNATURE_THRESHOLD;
     }
 
-    if (err == error.MetadataExpired or err == error.InvalidTimestampFormat or err == error.InvalidTimestampYear or err == error.InvalidTimestampMonth or err == error.InvalidTimestampDay or err == error.InvalidTimestampClock) {
+    if (err == error.MetadataExpired) {
         return .KX_TRUST_METADATA_EXPIRED;
     }
 
     if (err == error.RollbackDetected) return .KX_TRUST_ROLLBACK;
 
-    if (err == error.LinkedMetadataVersionMismatch or err == error.InvalidLinkedVersion or err == error.MissingLinkedMetadata) {
+    if (err == error.VersionLinkMismatch) {
         return .KX_TRUST_VERSION_LINK;
     }
 
-    if (err == error.InvalidMetadataVersion) {
+    if (err == error.VersionInvalid) {
         return .KX_TRUST_VERSION_INVALID;
     }
 
-    if (err == error.InvalidStateVersion) {
+    if (err == error.StateInvalid) {
         return .KX_TRUST_STATE_INVALID;
     }
 
-    if (err == error.AccessDenied or err == error.PermissionDenied or err == error.ReadOnlyFileSystem or err == error.NoSpaceLeft or err == error.InputOutput) {
+    if (err == error.StateIo) {
         return .KX_TRUST_STATE_IO;
     }
 
@@ -198,34 +227,16 @@ pub fn classifyTrust(err: anyerror) Code {
 }
 
 pub fn classifyParse(err: anyerror) Code {
-    if (err == error.Parse) return .KX_PARSE_EMPTY_INPUT;
-    if (err == error.Schema) return .KX_PARSE_SYNTAX;
-
-    if (err == error.MissingRequiredField or err == error.MissingVersion) {
-        return .KX_PARSE_MISSING_FIELD;
-    }
-
-    if (err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger) {
-        return .KX_PARSE_TYPE_MISMATCH;
-    }
-
-    if (err == error.UnsupportedVersion) {
-        return .KX_PARSE_VERSION_UNSUPPORTED;
-    }
-
-    if (err == error.OperatorNotAllowed) {
-        return .KX_PARSE_OPERATOR_DISALLOWED;
-    }
-
-    if (err == error.OutputsEmpty or err == error.InvalidOutputPath or err == error.InvalidMode) {
-        return .KX_PARSE_OUTPUT_INVALID;
-    }
-
-    if (err == error.InvalidHexLength or err == error.InvalidHexChar or err == error.InvalidPositiveInt or err == error.InvalidPolicyNetwork or err == error.InvalidPolicyClock or err == error.InvalidEnvTZ or err == error.InvalidEnvLang or err == error.InvalidDigits or err == error.InvalidVerifyMode or err == error.EmptyString) {
-        return .KX_PARSE_VALUE_INVALID;
-    }
-
-    if (err == error.UnsupportedFloatInCanonicalization or err == error.InvalidCanonicalObject) return .KX_PARSE_CANONICAL;
+    if (err == error.EmptyInput) return .KX_PARSE_EMPTY_INPUT;
+    if (err == error.Syntax) return .KX_PARSE_SYNTAX;
+    if (err == error.Schema) return .KX_PARSE_SCHEMA;
+    if (err == error.Canonicalization) return .KX_PARSE_CANONICAL;
+    if (err == error.MissingField) return .KX_PARSE_MISSING_FIELD;
+    if (err == error.TypeMismatch) return .KX_PARSE_TYPE_MISMATCH;
+    if (err == error.ValueInvalid) return .KX_PARSE_VALUE_INVALID;
+    if (err == error.VersionUnsupported) return .KX_PARSE_VERSION_UNSUPPORTED;
+    if (err == error.OperatorDisallowed) return .KX_PARSE_OPERATOR_DISALLOWED;
+    if (err == error.OutputInvalid) return .KX_PARSE_OUTPUT_INVALID;
 
     return .KX_INTERNAL;
 }
@@ -261,11 +272,11 @@ pub fn classifyIo(err: anyerror) Code {
 }
 
 pub fn classifyIntegrity(err: anyerror) Code {
-    if (err == error.BlobHashMismatch or err == error.BlobDigestMismatch) {
+    if (err == error.BlobMismatch) {
         return .KX_INTEGRITY_BLOB_MISMATCH;
     }
 
-    if (err == error.TreeRootMismatch or err == error.TreeDigestMismatch) {
+    if (err == error.TreeMismatch) {
         return .KX_INTEGRITY_TREE_MISMATCH;
     }
 
@@ -273,15 +284,15 @@ pub fn classifyIntegrity(err: anyerror) Code {
         return .KX_INTEGRITY_SIZE_MISMATCH;
     }
 
-    if (err == error.UnsupportedHashAlgorithm) {
+    if (err == error.HashUnsupported) {
         return .KX_INTEGRITY_HASH_UNSUPPORTED;
     }
 
-    if (err == error.PathTraversalDetected) {
+    if (err == error.PathTraversal) {
         return .KX_INTEGRITY_PATH_TRAVERSAL;
     }
 
-    if (err == error.SymlinkPolicyViolation) {
+    if (err == error.SymlinkPolicy) {
         return .KX_INTEGRITY_SYMLINK_POLICY;
     }
 
@@ -289,23 +300,23 @@ pub fn classifyIntegrity(err: anyerror) Code {
 }
 
 pub fn classifyBuild(err: anyerror) Code {
-    if (err == error.OperatorExecutionFailed) {
+    if (err == error.OperatorFailed) {
         return .KX_BUILD_OPERATOR_FAILED;
     }
 
-    if (err == error.OperatorNotAllowed) {
+    if (err == error.OperatorDisallowed) {
         return .KX_BUILD_OPERATOR_DISALLOWED;
     }
 
-    if (err == error.ToolchainNotFound or err == error.CompilerNotFound) {
+    if (err == error.ToolchainMissing) {
         return .KX_BUILD_TOOLCHAIN_MISSING;
     }
 
-    if (err == error.SandboxViolation or err == error.NetworkDisabled) {
+    if (err == error.SandboxViolation) {
         return .KX_BUILD_SANDBOX_VIOLATION;
     }
 
-    if (err == error.InvalidBuildGraph or err == error.DependencyCycle) {
+    if (err == error.GraphInvalid) {
         return .KX_BUILD_GRAPH_INVALID;
     }
 
@@ -317,7 +328,7 @@ pub fn classifyBuild(err: anyerror) Code {
 }
 
 pub fn classifyPublish(err: anyerror) Code {
-    if (err == error.AtomicRenameFailed) {
+    if (err == error.AtomicFailed) {
         return .KX_PUBLISH_ATOMIC;
     }
 
@@ -333,11 +344,91 @@ pub fn classifyPublish(err: anyerror) Code {
         return .KX_PUBLISH_FSYNC_FAILED;
     }
 
-    if (err == error.AccessDenied or err == error.PermissionDenied) {
+    if (err == error.PermissionDenied) {
         return .KX_PUBLISH_PERMISSION;
     }
 
     return .KX_INTERNAL;
+}
+
+pub fn normalizeIntegrity(err: anyerror) IntegrityError {
+    if (err == error.BlobMismatch or err == error.BlobHashMismatch or err == error.BlobDigestMismatch) {
+        return error.BlobMismatch;
+    }
+
+    if (err == error.TreeMismatch or err == error.TreeRootMismatch or err == error.TreeDigestMismatch) {
+        return error.TreeMismatch;
+    }
+
+    if (err == error.SizeMismatch) {
+        return error.SizeMismatch;
+    }
+
+    if (err == error.HashUnsupported or err == error.UnsupportedHashAlgorithm) {
+        return error.HashUnsupported;
+    }
+
+    if (err == error.PathTraversal or err == error.PathTraversalDetected) {
+        return error.PathTraversal;
+    }
+
+    if (err == error.SymlinkPolicy or err == error.SymlinkPolicyViolation) {
+        return error.SymlinkPolicy;
+    }
+
+    return error.Internal;
+}
+
+pub fn normalizeBuild(err: anyerror) BuildError {
+    if (err == error.OperatorFailed or err == error.OperatorExecutionFailed) {
+        return error.OperatorFailed;
+    }
+
+    if (err == error.OperatorDisallowed or err == error.OperatorNotAllowed) {
+        return error.OperatorDisallowed;
+    }
+
+    if (err == error.ToolchainMissing or err == error.ToolchainNotFound or err == error.CompilerNotFound) {
+        return error.ToolchainMissing;
+    }
+
+    if (err == error.SandboxViolation or err == error.NetworkDisabled) {
+        return error.SandboxViolation;
+    }
+
+    if (err == error.GraphInvalid or err == error.InvalidBuildGraph or err == error.DependencyCycle) {
+        return error.GraphInvalid;
+    }
+
+    if (err == error.Timeout) {
+        return error.Timeout;
+    }
+
+    return error.Internal;
+}
+
+pub fn normalizePublish(err: anyerror) PublishError {
+    if (err == error.AtomicFailed or err == error.AtomicRenameFailed) {
+        return error.AtomicFailed;
+    }
+
+    if (err == error.OutputMissing) {
+        return error.OutputMissing;
+    }
+
+    if (err == error.OutputHashMismatch) {
+        return error.OutputHashMismatch;
+    }
+
+    if (err == error.FsyncFailed) {
+        return error.FsyncFailed;
+    }
+
+    if (err == error.PermissionDenied or err == error.AccessDenied) {
+        return error.PermissionDenied;
+    }
+
+    return error.Internal;
 }
 
 test "classifyTrust maps rollback and expiry" {
@@ -347,13 +438,14 @@ test "classifyTrust maps rollback and expiry" {
 
 test "classifyTrust maps signature and policy details" {
     try std.testing.expectEqual(Code.KX_TRUST_SIGNATURE_THRESHOLD, classifyTrust(error.SignatureThresholdNotMet));
-    try std.testing.expectEqual(Code.KX_TRUST_ROLE_POLICY, classifyTrust(error.InvalidThreshold));
+    try std.testing.expectEqual(Code.KX_TRUST_ROLE_POLICY, classifyTrust(error.RolePolicyInvalid));
 }
 
 test "classifyParse maps schema and syntax" {
-    try std.testing.expectEqual(Code.KX_PARSE_EMPTY_INPUT, classifyParse(error.Parse));
-    try std.testing.expectEqual(Code.KX_PARSE_SYNTAX, classifyParse(error.Schema));
-    try std.testing.expectEqual(Code.KX_PARSE_VALUE_INVALID, classifyParse(error.InvalidPolicyNetwork));
+    try std.testing.expectEqual(Code.KX_PARSE_EMPTY_INPUT, classifyParse(error.EmptyInput));
+    try std.testing.expectEqual(Code.KX_PARSE_SYNTAX, classifyParse(error.Syntax));
+    try std.testing.expectEqual(Code.KX_PARSE_SCHEMA, classifyParse(error.Schema));
+    try std.testing.expectEqual(Code.KX_PARSE_VALUE_INVALID, classifyParse(error.ValueInvalid));
 }
 
 test "buildErrorId is stable" {
@@ -368,16 +460,31 @@ test "classifyIo maps not-found and no-space" {
 }
 
 test "classifyIntegrity maps blob and traversal" {
-    try std.testing.expectEqual(Code.KX_INTEGRITY_BLOB_MISMATCH, classifyIntegrity(error.BlobHashMismatch));
-    try std.testing.expectEqual(Code.KX_INTEGRITY_PATH_TRAVERSAL, classifyIntegrity(error.PathTraversalDetected));
+    try std.testing.expectEqual(Code.KX_INTEGRITY_BLOB_MISMATCH, classifyIntegrity(error.BlobMismatch));
+    try std.testing.expectEqual(Code.KX_INTEGRITY_PATH_TRAVERSAL, classifyIntegrity(error.PathTraversal));
 }
 
 test "classifyBuild maps operator and timeout" {
-    try std.testing.expectEqual(Code.KX_BUILD_OPERATOR_FAILED, classifyBuild(error.OperatorExecutionFailed));
+    try std.testing.expectEqual(Code.KX_BUILD_OPERATOR_FAILED, classifyBuild(error.OperatorFailed));
     try std.testing.expectEqual(Code.KX_BUILD_TIMEOUT, classifyBuild(error.Timeout));
 }
 
 test "classifyPublish maps output and fsync" {
     try std.testing.expectEqual(Code.KX_PUBLISH_OUTPUT_MISSING, classifyPublish(error.OutputMissing));
     try std.testing.expectEqual(Code.KX_PUBLISH_FSYNC_FAILED, classifyPublish(error.FsyncFailed));
+}
+
+test "normalizeIntegrity maps legacy aliases" {
+    try std.testing.expect(normalizeIntegrity(error.BlobHashMismatch) == error.BlobMismatch);
+    try std.testing.expect(normalizeIntegrity(error.PathTraversalDetected) == error.PathTraversal);
+}
+
+test "normalizeBuild maps legacy aliases" {
+    try std.testing.expect(normalizeBuild(error.OperatorExecutionFailed) == error.OperatorFailed);
+    try std.testing.expect(normalizeBuild(error.DependencyCycle) == error.GraphInvalid);
+}
+
+test "normalizePublish maps legacy aliases" {
+    try std.testing.expect(normalizePublish(error.AtomicRenameFailed) == error.AtomicFailed);
+    try std.testing.expect(normalizePublish(error.AccessDenied) == error.PermissionDenied);
 }
