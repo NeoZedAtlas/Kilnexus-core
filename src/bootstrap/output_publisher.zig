@@ -18,7 +18,14 @@ pub fn verifyWorkspaceOutputs(
             error.FileNotFound, error.NotDir, error.IsDir => return error.OutputMissing,
             else => return err,
         };
-        file.close();
+        defer file.close();
+
+        if (entry.sha256) |expected_digest| {
+            const actual = try hashOpenFile(&file);
+            if (!std.mem.eql(u8, &actual, &expected_digest)) {
+                return error.OutputHashMismatch;
+            }
+        }
     }
 }
 
@@ -55,6 +62,22 @@ pub fn atomicPublish(
             error.FileNotFound, error.NotDir, error.IsDir => return error.OutputMissing,
             else => return err,
         };
+
+        if (std.fs.has_executable_bit) {
+            var staged_file = std.fs.cwd().openFile(staged_path, .{}) catch |err| switch (err) {
+                error.FileNotFound, error.NotDir, error.IsDir => return error.OutputMissing,
+                else => return err,
+            };
+            defer staged_file.close();
+            staged_file.chmod(entry.mode) catch return error.PermissionDenied;
+            staged_file.sync() catch return error.FsyncFailed;
+        } else {
+            try syncFilePath(staged_path);
+        }
+
+        if (std.fs.path.dirname(staged_path)) |parent| {
+            try syncDirPath(parent);
+        }
     }
 
     std.fs.cwd().rename(stage_root, options.output_root) catch |err| switch (err) {
@@ -65,6 +88,12 @@ pub fn atomicPublish(
         => return error.AtomicRenameFailed,
         else => return err,
     };
+
+    if (std.fs.path.dirname(options.output_root)) |parent| {
+        try syncDirPath(parent);
+    } else {
+        try syncDirPath(".");
+    }
 }
 
 fn outputRelativePath(path: []const u8) ![]const u8 {
@@ -89,6 +118,39 @@ fn pathExists(path: []const u8) !bool {
         else => return err,
     };
     return true;
+}
+
+fn syncFilePath(path: []const u8) !void {
+    var file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.IsDir => return error.OutputMissing,
+        else => return err,
+    };
+    defer file.close();
+    file.sync() catch return error.FsyncFailed;
+}
+
+fn syncDirPath(path: []const u8) !void {
+    if (@import("builtin").os.tag == .windows) return;
+    var dir = std.fs.cwd().openDir(path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return error.AtomicRenameFailed,
+        else => return err,
+    };
+    defer dir.close();
+    dir.sync() catch return error.FsyncFailed;
+}
+
+fn hashOpenFile(file: *std.fs.File) ![32]u8 {
+    try file.seekTo(0);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buffer: [64 * 1024]u8 = undefined;
+    while (true) {
+        const read_len = try file.read(&buffer);
+        if (read_len == 0) break;
+        hasher.update(buffer[0..read_len]);
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
 }
 
 test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
@@ -125,6 +187,13 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
     const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings("artifact\n", bytes);
+
+    if (std.fs.has_executable_bit) {
+        var published_file = try std.fs.cwd().openFile(published, .{});
+        defer published_file.close();
+        const stat = try published_file.stat();
+        try std.testing.expect((stat.mode & 0o111) != 0);
+    }
 }
 
 test "atomicPublish fails when output root already exists" {
@@ -158,4 +227,30 @@ test "atomicPublish fails when output root already exists" {
             .output_root = output_root,
         }),
     );
+}
+
+test "verifyWorkspaceOutputs fails on sha256 mismatch" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("workspace/kilnexus-out");
+    try tmp.dir.writeFile(.{
+        .sub_path = "workspace/kilnexus-out/app",
+        .data = "artifact\n",
+    });
+
+    const workspace_cwd = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/workspace", .{tmp.sub_path[0..]});
+    defer allocator.free(workspace_cwd);
+
+    var entries = try allocator.alloc(validator.OutputEntry, 1);
+    entries[0] = .{
+        .path = try allocator.dupe(u8, "kilnexus-out/app"),
+        .mode = 0o755,
+        .sha256 = [_]u8{0xaa} ** 32,
+    };
+    var spec: validator.OutputSpec = .{ .entries = entries };
+    defer spec.deinit(allocator);
+
+    try std.testing.expectError(error.OutputHashMismatch, verifyWorkspaceOutputs(allocator, workspace_cwd, &spec));
 }

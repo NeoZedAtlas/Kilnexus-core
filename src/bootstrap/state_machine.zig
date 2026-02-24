@@ -339,7 +339,8 @@ fn classifyByState(state: State, err: anyerror) kx_error.Code {
         .init => kx_error.classifyIo(err),
         .load_trust_metadata, .verify_metadata_chain => kx_error.classifyTrust(err),
         .parse_knxfile => kx_error.classifyParse(err),
-        .resolve_toolchain, .download_blob, .seal_cache_object => kx_error.classifyIo(err),
+        .resolve_toolchain => classifyResolve(err),
+        .download_blob, .seal_cache_object => kx_error.classifyIo(err),
         .unpack_staging => classifyUnpack(err),
         .verify_blob => kx_error.classifyIntegrity(err),
         .compute_tree_root, .verify_tree_root => kx_error.classifyIntegrity(err),
@@ -351,7 +352,8 @@ fn classifyByState(state: State, err: anyerror) kx_error.Code {
 
 fn normalizeCauseByState(state: State, err: anyerror) anyerror {
     return switch (state) {
-        .init, .resolve_toolchain, .download_blob, .seal_cache_object => kx_error.normalizeIo(err),
+        .init, .download_blob, .seal_cache_object => kx_error.normalizeIo(err),
+        .resolve_toolchain => normalizeResolveCause(err),
         .unpack_staging => normalizeUnpackCause(err),
         .load_trust_metadata, .verify_metadata_chain => mini_tuf.normalizeError(err),
         .parse_knxfile => parse_errors.normalize(err),
@@ -369,6 +371,18 @@ fn classifyUnpack(err: anyerror) kx_error.Code {
 }
 
 fn normalizeUnpackCause(err: anyerror) anyerror {
+    const integrity = kx_error.normalizeIntegrity(err);
+    if (integrity != error.Internal) return integrity;
+    return kx_error.normalizeIo(err);
+}
+
+fn classifyResolve(err: anyerror) kx_error.Code {
+    const integrity_code = kx_error.classifyIntegrity(err);
+    if (integrity_code != .KX_INTERNAL) return integrity_code;
+    return kx_error.classifyIo(err);
+}
+
+fn normalizeResolveCause(err: anyerror) anyerror {
     const integrity = kx_error.normalizeIntegrity(err);
     if (integrity != error.Internal) return integrity;
     return kx_error.normalizeIo(err);
@@ -545,6 +559,8 @@ test "attemptRunWithOptions maps integrity failure by error kind" {
 
     const mapped_tree = classifyByState(.verify_tree_root, normalizeCauseByState(.verify_tree_root, error.PathTraversalDetected));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped_tree);
+    const mapped_resolve_tree = classifyByState(.resolve_toolchain, normalizeCauseByState(.resolve_toolchain, error.TreeRootMismatch));
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_TREE_MISMATCH, mapped_resolve_tree);
 
     _ = source;
     _ = allocator;
@@ -553,6 +569,8 @@ test "attemptRunWithOptions maps integrity failure by error kind" {
 test "attemptRunWithOptions maps publish failure by error kind" {
     const mapped = classifyByState(.atomic_publish, normalizeCauseByState(.atomic_publish, error.FsyncFailed));
     try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped);
+    const hash_mapped = classifyByState(.verify_outputs, normalizeCauseByState(.verify_outputs, error.OutputHashMismatch));
+    try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_OUTPUT_HASH_MISMATCH, hash_mapped);
 }
 
 test "attemptRunWithOptions maps unpack traversal as integrity error" {

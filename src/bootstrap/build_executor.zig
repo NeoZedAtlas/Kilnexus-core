@@ -129,6 +129,18 @@ fn executeArchivePack(
         };
     }
 
+    switch (pack.format) {
+        .tar => try writeTarArchive(allocator, workspace_cwd, pack.input_paths, out_abs),
+        .tar_gz => return error.OperatorExecutionFailed,
+    }
+}
+
+fn writeTarArchive(
+    allocator: std.mem.Allocator,
+    workspace_cwd: []const u8,
+    input_paths: [][]u8,
+    out_abs: []const u8,
+) !void {
     var out_file = std.fs.cwd().createFile(out_abs, .{}) catch |err| switch (err) {
         error.IsDir, error.FileNotFound, error.NotDir => return error.OperatorExecutionFailed,
         else => return err,
@@ -139,7 +151,7 @@ fn executeArchivePack(
     var out_writer = out_file.writer(&out_buffer);
     var tar_writer: std.tar.Writer = .{ .underlying_writer = &out_writer.interface };
 
-    for (pack.input_paths) |input_path| {
+    for (input_paths) |input_path| {
         const input_abs = try std.fs.path.join(allocator, &.{ workspace_cwd, input_path });
         defer allocator.free(input_abs);
 
@@ -316,6 +328,7 @@ test "executeBuildGraph packs archive in workspace" {
         .archive_pack = .{
             .input_paths = inputs,
             .out_path = try allocator.dupe(u8, "kilnexus-out/objects.tar"),
+            .format = .tar,
         },
     };
     var build_spec: validator.BuildSpec = .{ .ops = ops };
@@ -344,4 +357,26 @@ test "executeBuildGraph packs archive in workspace" {
     const entry2 = (try it.next()) orelse return error.TestUnexpectedResult;
     try std.testing.expect(entry2.kind == .file);
     try std.testing.expectEqualStrings("obj/b.o", entry2.name);
+}
+
+test "executeBuildGraph rejects archive.pack tar.gz until gzip writer is stabilized" {
+    const allocator = std.testing.allocator;
+    var inputs = try allocator.alloc([]u8, 1);
+    inputs[0] = try allocator.dupe(u8, "obj/a.o");
+
+    var ops = try allocator.alloc(validator.BuildOp, 1);
+    ops[0] = .{
+        .archive_pack = .{
+            .input_paths = inputs,
+            .out_path = try allocator.dupe(u8, "kilnexus-out/objects.tar.gz"),
+            .format = .tar_gz,
+        },
+    };
+    var build_spec: validator.BuildSpec = .{ .ops = ops };
+    defer build_spec.deinit(allocator);
+
+    try std.testing.expectError(
+        error.OperatorExecutionFailed,
+        executeBuildGraph(allocator, ".", &build_spec, .{}),
+    );
 }

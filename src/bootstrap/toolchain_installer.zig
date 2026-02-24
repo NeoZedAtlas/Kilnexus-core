@@ -477,6 +477,9 @@ fn validateArchivePath(path: []const u8) !void {
 
 const TreeEntryDigest = struct {
     path: []u8,
+    kind: u8,
+    mode: u32,
+    size: u64,
     digest: [32]u8,
 };
 
@@ -500,10 +503,14 @@ fn computeTreeRootForDir(allocator: std.mem.Allocator, dir_path: []const u8) ![3
             .file => {
                 var file = try entry.dir.openFile(entry.basename, .{});
                 defer file.close();
-                const digest = (try hashFile(&file)).digest;
+                const file_digest = try hashFile(&file);
+                const stat = try file.stat();
                 try entries.append(allocator, .{
                     .path = try allocator.dupe(u8, entry.path),
-                    .digest = digest,
+                    .kind = 1, // file
+                    .mode = normalizeTreeEntryMode(stat.mode),
+                    .size = file_digest.size,
+                    .digest = file_digest.digest,
                 });
             },
             else => return error.SymlinkPolicyViolation,
@@ -518,13 +525,27 @@ fn computeTreeRootForDir(allocator: std.mem.Allocator, dir_path: []const u8) ![3
 
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     for (entries.items) |entry| {
+        var mode_bytes: [4]u8 = undefined;
+        var size_bytes: [8]u8 = undefined;
         hasher.update(entry.path);
         hasher.update(&[_]u8{0});
+        hasher.update(&[_]u8{entry.kind});
+        std.mem.writeInt(u32, &mode_bytes, entry.mode, .little);
+        hasher.update(&mode_bytes);
+        std.mem.writeInt(u64, &size_bytes, entry.size, .little);
+        hasher.update(&size_bytes);
         hasher.update(&entry.digest);
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return digest;
+}
+
+fn normalizeTreeEntryMode(mode: std.fs.File.Mode) u32 {
+    if (std.fs.has_executable_bit and (mode & 0o111) != 0) {
+        return 0o755;
+    }
+    return 0o644;
 }
 
 fn pathIsDirectory(path: []const u8) !bool {
@@ -750,4 +771,41 @@ test "unpackStaging rejects tar path traversal entries" {
 
     try session.downloadBlob();
     try std.testing.expectError(error.PathTraversalDetected, session.unpackStaging());
+}
+
+test "computeTreeRootForDir includes normalized mode bits" {
+    if (!std.fs.has_executable_bit) return;
+
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("tree-a/bin");
+    try tmp.dir.writeFile(.{
+        .sub_path = "tree-a/bin/tool",
+        .data = "same-bytes\n",
+    });
+    try tmp.dir.makePath("tree-b/bin");
+    try tmp.dir.writeFile(.{
+        .sub_path = "tree-b/bin/tool",
+        .data = "same-bytes\n",
+    });
+
+    var non_exec = try tmp.dir.openFile("tree-a/bin/tool", .{});
+    defer non_exec.close();
+    try non_exec.chmod(0o644);
+
+    var exec = try tmp.dir.openFile("tree-b/bin/tool", .{});
+    defer exec.close();
+    try exec.chmod(0o755);
+
+    const root_a = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/tree-a", .{tmp.sub_path[0..]});
+    defer allocator.free(root_a);
+    const root_b = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/tree-b", .{tmp.sub_path[0..]});
+    defer allocator.free(root_b);
+
+    const digest_a = try computeTreeRootForDir(allocator, root_a);
+    const digest_b = try computeTreeRootForDir(allocator, root_b);
+
+    try std.testing.expect(!std.mem.eql(u8, &digest_a, &digest_b));
 }

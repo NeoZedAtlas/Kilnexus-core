@@ -64,6 +64,7 @@ pub const WorkspaceSpec = struct {
 pub const OutputEntry = struct {
     path: []u8,
     mode: u16,
+    sha256: ?[32]u8 = null,
 
     pub fn deinit(self: *OutputEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
@@ -124,6 +125,7 @@ pub const ZigLinkOp = struct {
 pub const ArchivePackOp = struct {
     input_paths: [][]u8,
     out_path: []u8,
+    format: ArchiveFormat = .tar,
 
     pub fn deinit(self: *ArchivePackOp, allocator: std.mem.Allocator) void {
         for (self.input_paths) |path| allocator.free(path);
@@ -131,6 +133,11 @@ pub const ArchivePackOp = struct {
         allocator.free(self.out_path);
         self.* = undefined;
     }
+};
+
+pub const ArchiveFormat = enum {
+    tar,
+    tar_gz,
 };
 
 pub const BuildOp = union(enum) {
@@ -197,6 +204,9 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
         try validateOutputPath(path);
         const mode = try expectNonEmptyString(output, "mode");
         try expectModeString(mode);
+        if (output.get("sha256")) |_| {
+            try expectHex64(output, "sha256");
+        }
     }
 
     if (root.get("operators")) |operators_value| {
@@ -300,6 +310,10 @@ pub fn parseOutputSpec(allocator: std.mem.Allocator, canonical_json: []const u8)
         try validateOutputPath(path_text);
         const mode_text = try expectNonEmptyString(obj, "mode");
         const mode = try parseOutputMode(mode_text);
+        const sha256 = if (obj.get("sha256")) |sha_value| blk: {
+            const sha_text = try expectString(sha_value, "sha256");
+            break :blk try parseHexFixed(32, sha_text);
+        } else null;
 
         const path = try allocator.dupe(u8, path_text);
         errdefer allocator.free(path);
@@ -307,6 +321,7 @@ pub fn parseOutputSpec(allocator: std.mem.Allocator, canonical_json: []const u8)
         try entries.append(allocator, .{
             .path = path,
             .mode = mode,
+            .sha256 = sha256,
         });
     }
 
@@ -424,6 +439,10 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
         if (std.mem.eql(u8, op_name, "knx.archive.pack")) {
             const out_text = try expectNonEmptyString(obj, "out");
             try validateWorkspaceRelativePath(out_text);
+            const format = if (obj.get("format")) |format_value| blk: {
+                const format_text = try expectString(format_value, "archive format");
+                break :blk parseArchiveFormat(format_text) orelse return error.ValueInvalid;
+            } else .tar;
             const inputs = try expectArrayField(obj, "inputs");
             if (inputs.items.len == 0) return error.ValueInvalid;
 
@@ -451,6 +470,7 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
                 .archive_pack = .{
                     .input_paths = input_paths,
                     .out_path = out_path,
+                    .format = format,
                 },
             });
             continue;
@@ -526,6 +546,12 @@ fn parseCasDomain(text: []const u8) ?CasDomain {
     if (std.mem.eql(u8, text, "official")) return .official;
     if (std.mem.eql(u8, text, "third_party")) return .third_party;
     if (std.mem.eql(u8, text, "local")) return .local;
+    return null;
+}
+
+fn parseArchiveFormat(text: []const u8) ?ArchiveFormat {
+    if (std.mem.eql(u8, text, "tar")) return .tar;
+    if (std.mem.eql(u8, text, "tar.gz")) return .tar_gz;
     return null;
 }
 
@@ -962,6 +988,46 @@ test "parseOutputSpec parses output entries" {
     try std.testing.expectEqual(@as(usize, 1), spec.entries.len);
     try std.testing.expectEqualStrings("kilnexus-out/app", spec.entries[0].path);
     try std.testing.expectEqual(@as(u16, 0o755), spec.entries[0].mode);
+    try std.testing.expect(spec.entries[0].sha256 == null);
+}
+
+test "parseOutputSpec parses output sha256 when declared" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    {
+        \\      "path": "kilnexus-out/app",
+        \\      "mode": "0755",
+        \\      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseOutputSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), spec.entries.len);
+    try std.testing.expect(spec.entries[0].sha256 != null);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xcc} ** 32), &spec.entries[0].sha256.?);
 }
 
 test "parseBuildSpec parses fs.copy operation" {
@@ -1156,6 +1222,55 @@ test "parseBuildSpec parses archive.pack operation" {
             try std.testing.expectEqualStrings("obj/a.o", pack.input_paths[0]);
             try std.testing.expectEqualStrings("obj/b.o", pack.input_paths[1]);
             try std.testing.expectEqualStrings("kilnexus-out/objects.tar", pack.out_path);
+            try std.testing.expectEqual(ArchiveFormat.tar, pack.format);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parseBuildSpec parses archive.pack tar.gz format" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    {
+        \\      "op": "knx.archive.pack",
+        \\      "inputs": ["obj/a.o"],
+        \\      "out": "kilnexus-out/objects.tar.gz",
+        \\      "format": "tar.gz"
+        \\    }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/objects.tar.gz", "mode": "0644" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseBuildSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), spec.ops.len);
+    switch (spec.ops[0]) {
+        .archive_pack => |pack| {
+            try std.testing.expectEqual(ArchiveFormat.tar_gz, pack.format);
+            try std.testing.expectEqualStrings("kilnexus-out/objects.tar.gz", pack.out_path);
         },
         else => return error.TestUnexpectedResult,
     }
