@@ -14,16 +14,29 @@ pub fn main() !void {
 
     if (!std.mem.eql(u8, command, "bootstrap")) {
         std.debug.print("Unknown command: {s}\n", .{command});
-        std.debug.print("Usage: Kilnexus_core bootstrap [Knxfile]\n", .{});
+        std.debug.print("Usage: Kilnexus_core bootstrap [Knxfile] [trust-dir]\n", .{});
         return error.InvalidCommand;
     }
 
     const path = args.next() orelse "Knxfile";
+    const trust_dir = args.next() orelse "trust";
 
-    var run_result = try bootstrap.runFromPath(allocator, path);
+    var run_result = try bootstrap.runFromPathWithOptions(allocator, path, .{
+        .trust_metadata_dir = trust_dir,
+        .trust_state_path = ".kilnexus-trust-state.json",
+    });
     defer run_result.deinit(allocator);
 
     std.debug.print("Bootstrap completed with state: {s}\n", .{@tagName(run_result.final_state)});
+    std.debug.print(
+        "Trust versions root/timestamp/snapshot/targets: {d}/{d}/{d}/{d}\n",
+        .{
+            run_result.trust.root_version,
+            run_result.trust.timestamp_version,
+            run_result.trust.snapshot_version,
+            run_result.trust.targets_version,
+        },
+    );
     std.debug.print("Verify mode: {s}\n", .{@tagName(run_result.verify_mode)});
     std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
     std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});

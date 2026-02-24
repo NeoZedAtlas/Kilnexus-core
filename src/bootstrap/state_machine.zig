@@ -1,6 +1,7 @@
 const std = @import("std");
 const abi_parser = @import("../parser/abi_parser.zig");
 const validator = @import("../knx/validator.zig");
+const mini_tuf = @import("../trust/mini_tuf.zig");
 
 pub const State = enum {
     init,
@@ -26,6 +27,7 @@ pub const RunResult = struct {
     canonical_json: []u8,
     verify_mode: validator.VerifyMode,
     knx_digest_hex: [64]u8,
+    trust: mini_tuf.VerificationSummary,
     final_state: State,
 
     pub fn deinit(self: *RunResult, allocator: std.mem.Allocator) void {
@@ -38,18 +40,56 @@ pub const RunResult = struct {
 const max_knxfile_bytes: usize = 4 * 1024 * 1024;
 
 pub fn runFromPath(allocator: std.mem.Allocator, path: []const u8) !RunResult {
+    return runFromPathWithOptions(allocator, path, .{});
+}
+
+pub const RunOptions = struct {
+    trust_metadata_dir: ?[]const u8 = "trust",
+    trust_state_path: ?[]const u8 = ".kilnexus-trust-state.json",
+};
+
+pub fn runFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) !RunResult {
     const source = try std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes);
     defer allocator.free(source);
-    return run(allocator, source);
+    return runWithOptions(allocator, source, options);
 }
 
 pub fn run(allocator: std.mem.Allocator, source: []const u8) !RunResult {
+    return runWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+    });
+}
+
+pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) !RunResult {
     var trace: std.ArrayList(State) = .empty;
     errdefer trace.deinit(allocator);
 
     try push(&trace, allocator, .init);
     try push(&trace, allocator, .load_trust_metadata);
-    try push(&trace, allocator, .verify_metadata_chain);
+    var trust_summary: mini_tuf.VerificationSummary = .{
+        .root_version = 0,
+        .timestamp_version = 0,
+        .snapshot_version = 0,
+        .targets_version = 0,
+    };
+    if (options.trust_metadata_dir) |trust_dir_path| {
+        var bundle = mini_tuf.loadFromDir(allocator, trust_dir_path) catch |err| {
+            try push(&trace, allocator, .failed);
+            return err;
+        };
+        defer bundle.deinit(allocator);
+
+        try push(&trace, allocator, .verify_metadata_chain);
+        trust_summary = mini_tuf.verify(allocator, &bundle, .{
+            .state_path = options.trust_state_path,
+        }) catch |err| {
+            try push(&trace, allocator, .failed);
+            return err;
+        };
+    } else {
+        try push(&trace, allocator, .verify_metadata_chain);
+    }
     try push(&trace, allocator, .parse_knxfile);
 
     const parsed = abi_parser.parseLockfile(allocator, source) catch |err| {
@@ -80,6 +120,7 @@ pub fn run(allocator: std.mem.Allocator, source: []const u8) !RunResult {
         .canonical_json = parsed.canonical_json,
         .verify_mode = validation.verify_mode,
         .knx_digest_hex = knx_digest_hex,
+        .trust = trust_summary,
         .final_state = .done,
     };
 }
