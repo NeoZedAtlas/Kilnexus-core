@@ -131,8 +131,23 @@ fn executeArchivePack(
 
     switch (pack.format) {
         .tar => try writeTarArchive(allocator, workspace_cwd, pack.input_paths, out_abs),
-        .tar_gz => return error.OperatorExecutionFailed,
+        .tar_gz => try writeTarGzArchive(allocator, workspace_cwd, pack.input_paths, out_abs),
     }
+}
+
+fn writeTarGzArchive(
+    allocator: std.mem.Allocator,
+    workspace_cwd: []const u8,
+    input_paths: [][]u8,
+    out_abs: []const u8,
+) !void {
+    const temp_tar = try std.fmt.allocPrint(allocator, "{s}.tmp-tar-{d}", .{ out_abs, std.time.microTimestamp() });
+    defer allocator.free(temp_tar);
+    errdefer std.fs.cwd().deleteFile(temp_tar) catch {};
+
+    try writeTarArchive(allocator, workspace_cwd, input_paths, temp_tar);
+    try gzipFromFileStored(temp_tar, out_abs);
+    std.fs.cwd().deleteFile(temp_tar) catch {};
 }
 
 fn writeTarArchive(
@@ -173,6 +188,73 @@ fn writeTarArchive(
     }
 
     try out_writer.interface.flush();
+}
+
+fn gzipFromFileStored(input_path: []const u8, out_path: []const u8) !void {
+    var input_file = std.fs.cwd().openFile(input_path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.IsDir => return error.OperatorExecutionFailed,
+        else => return err,
+    };
+    defer input_file.close();
+
+    var out_file = std.fs.cwd().createFile(out_path, .{}) catch |err| switch (err) {
+        error.IsDir, error.FileNotFound, error.NotDir => return error.OperatorExecutionFailed,
+        else => return err,
+    };
+    defer out_file.close();
+
+    var out_buffer: [64 * 1024]u8 = undefined;
+    var out_writer = out_file.writer(&out_buffer);
+    // Deterministic gzip header: mtime=0, xfl=0, os=255.
+    const gzip_header = [_]u8{ 0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff };
+    out_writer.interface.writeAll(&gzip_header) catch return error.OperatorExecutionFailed;
+
+    var crc: std.hash.Crc32 = .init();
+    var gzip_size_mod32: u32 = 0;
+    var buffer: [64 * 1024]u8 = undefined;
+
+    while (true) {
+        const read_len = input_file.read(&buffer) catch return error.OperatorExecutionFailed;
+        if (read_len == 0) break;
+        const chunk = buffer[0..read_len];
+        crc.update(chunk);
+        gzip_size_mod32 +%= @as(u32, @intCast(chunk.len));
+
+        var offset: usize = 0;
+        while (offset < chunk.len) {
+            const block_len: usize = @min(@as(usize, 65_535), chunk.len - offset);
+            try writeDeflateStoredBlock(&out_writer.interface, false, chunk[offset .. offset + block_len]);
+            offset += block_len;
+        }
+    }
+
+    try writeDeflateStoredBlock(&out_writer.interface, true, &.{});
+
+    var crc_bytes: [4]u8 = undefined;
+    var isize_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &crc_bytes, crc.final(), .little);
+    std.mem.writeInt(u32, &isize_bytes, gzip_size_mod32, .little);
+    out_writer.interface.writeAll(&crc_bytes) catch return error.OperatorExecutionFailed;
+    out_writer.interface.writeAll(&isize_bytes) catch return error.OperatorExecutionFailed;
+    out_writer.interface.flush() catch return error.OperatorExecutionFailed;
+}
+
+fn writeDeflateStoredBlock(writer: *std.Io.Writer, is_final: bool, payload: []const u8) !void {
+    if (payload.len > 65_535) return error.OperatorExecutionFailed;
+
+    const header = [_]u8{if (is_final) 0x01 else 0x00};
+    writer.writeAll(&header) catch return error.OperatorExecutionFailed;
+
+    const len_u16: u16 = @intCast(payload.len);
+    var len_bytes: [2]u8 = undefined;
+    var nlen_bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &len_bytes, len_u16, .little);
+    std.mem.writeInt(u16, &nlen_bytes, ~len_u16, .little);
+    writer.writeAll(&len_bytes) catch return error.OperatorExecutionFailed;
+    writer.writeAll(&nlen_bytes) catch return error.OperatorExecutionFailed;
+    if (payload.len != 0) {
+        writer.writeAll(payload) catch return error.OperatorExecutionFailed;
+    }
 }
 
 fn runCommand(
@@ -359,10 +441,27 @@ test "executeBuildGraph packs archive in workspace" {
     try std.testing.expectEqualStrings("obj/b.o", entry2.name);
 }
 
-test "executeBuildGraph rejects archive.pack tar.gz until gzip writer is stabilized" {
+test "executeBuildGraph packs archive.gz in workspace" {
     const allocator = std.testing.allocator;
-    var inputs = try allocator.alloc([]u8, 1);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("workspace/obj");
+    try tmp.dir.writeFile(.{
+        .sub_path = "workspace/obj/a.o",
+        .data = "obj-a\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "workspace/obj/b.o",
+        .data = "obj-b\n",
+    });
+
+    const workspace_cwd = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/workspace", .{tmp.sub_path[0..]});
+    defer allocator.free(workspace_cwd);
+
+    var inputs = try allocator.alloc([]u8, 2);
     inputs[0] = try allocator.dupe(u8, "obj/a.o");
+    inputs[1] = try allocator.dupe(u8, "obj/b.o");
 
     var ops = try allocator.alloc(validator.BuildOp, 1);
     ops[0] = .{
@@ -375,8 +474,30 @@ test "executeBuildGraph rejects archive.pack tar.gz until gzip writer is stabili
     var build_spec: validator.BuildSpec = .{ .ops = ops };
     defer build_spec.deinit(allocator);
 
-    try std.testing.expectError(
-        error.OperatorExecutionFailed,
-        executeBuildGraph(allocator, ".", &build_spec, .{}),
-    );
+    try executeBuildGraph(allocator, workspace_cwd, &build_spec, .{});
+
+    const archive_path = try std.fs.path.join(allocator, &.{ workspace_cwd, "kilnexus-out/objects.tar.gz" });
+    defer allocator.free(archive_path);
+    var archive_file = try std.fs.cwd().openFile(archive_path, .{});
+    defer archive_file.close();
+
+    var read_buffer: [64 * 1024]u8 = undefined;
+    var file_reader = archive_file.reader(&read_buffer);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompress = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &window);
+
+    var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(&decompress.reader, .{
+        .file_name_buffer = &file_name_buffer,
+        .link_name_buffer = &link_name_buffer,
+    });
+
+    const entry1 = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry1.kind == .file);
+    try std.testing.expectEqualStrings("obj/a.o", entry1.name);
+
+    const entry2 = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry2.kind == .file);
+    try std.testing.expectEqualStrings("obj/b.o", entry2.name);
 }

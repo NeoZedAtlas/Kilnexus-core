@@ -835,3 +835,103 @@ test "run publishes archive.pack output from workspace inputs" {
     try std.testing.expect(entry2.kind == .file);
     try std.testing.expectEqualStrings("obj/b.o", entry2.name);
 }
+
+test "run publishes archive.pack tar.gz output from workspace inputs" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project/obj");
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/obj/a.o",
+        .data = "obj-a\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/obj/b.o",
+        .data = "obj-b\n",
+    });
+
+    const source_a = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/obj/a.o", .{tmp.sub_path[0..]});
+    defer allocator.free(source_a);
+    const source_b = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/obj/b.o", .{tmp.sub_path[0..]});
+    defer allocator.free(source_b);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
+    defer allocator.free(cache_root);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/final/kilnexus-out", .{tmp.sub_path[0..]});
+    defer allocator.free(output_root);
+
+    const source = try std.fmt.allocPrint(
+        allocator,
+        \\{{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {{
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  }},
+        \\  "policy": {{
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  }},
+        \\  "env": {{
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  }},
+        \\  "inputs": [
+        \\    {{ "path": "obj/a.o", "source": "{s}" }},
+        \\    {{ "path": "obj/b.o", "source": "{s}" }}
+        \\  ],
+        \\  "build": [
+        \\    {{
+        \\      "op": "knx.archive.pack",
+        \\      "inputs": ["obj/a.o", "obj/b.o"],
+        \\      "out": "kilnexus-out/objects.tar.gz",
+        \\      "format": "tar.gz"
+        \\    }}
+        \\  ],
+        \\  "outputs": [
+        \\    {{ "path": "kilnexus-out/objects.tar.gz", "mode": "0644" }}
+        \\  ]
+        \\}}
+    ,
+        .{ source_a, source_b },
+    );
+    defer allocator.free(source);
+
+    var result = try runWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+        .cache_root = cache_root,
+        .output_root = output_root,
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(State.done, result.final_state);
+
+    const archive_path = try std.fs.path.join(allocator, &.{ output_root, "objects.tar.gz" });
+    defer allocator.free(archive_path);
+    var archive_file = try std.fs.cwd().openFile(archive_path, .{});
+    defer archive_file.close();
+
+    var read_buffer: [64 * 1024]u8 = undefined;
+    var file_reader = archive_file.reader(&read_buffer);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var decompress = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &window);
+
+    var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(&decompress.reader, .{
+        .file_name_buffer = &file_name_buffer,
+        .link_name_buffer = &link_name_buffer,
+    });
+
+    const entry1 = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry1.kind == .file);
+    try std.testing.expectEqualStrings("obj/a.o", entry1.name);
+    const entry2 = (try it.next()) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(entry2.kind == .file);
+    try std.testing.expectEqualStrings("obj/b.o", entry2.name);
+}

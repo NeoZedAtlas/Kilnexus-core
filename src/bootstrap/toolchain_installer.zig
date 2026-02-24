@@ -22,6 +22,7 @@ pub const InstallSession = struct {
     cache_root: []u8,
     blob_path: []u8,
     tree_path: []u8,
+    fast_manifest_path: []u8,
     staging_path: []u8,
     computed_tree_root: ?[32]u8 = null,
     cache_hit: bool = false,
@@ -40,6 +41,10 @@ pub const InstallSession = struct {
         errdefer allocator.free(blob_path);
         const tree_path = try std.fs.path.join(allocator, &.{ cache_root, "cas", "official", "tree", tree_hex[0..] });
         errdefer allocator.free(tree_path);
+        const fast_name = try std.fmt.allocPrint(allocator, "{s}.json", .{tree_hex[0..]});
+        defer allocator.free(fast_name);
+        const fast_manifest_path = try std.fs.path.join(allocator, &.{ cache_root, "cas", "official", "fast", "tree", fast_name });
+        errdefer allocator.free(fast_manifest_path);
 
         const sanitized_id = try sanitizeId(allocator, spec.id);
         defer allocator.free(sanitized_id);
@@ -60,6 +65,7 @@ pub const InstallSession = struct {
             .cache_root = cache_root,
             .blob_path = blob_path,
             .tree_path = tree_path,
+            .fast_manifest_path = fast_manifest_path,
             .staging_path = staging_path,
         };
     }
@@ -68,6 +74,7 @@ pub const InstallSession = struct {
         self.allocator.free(self.cache_root);
         self.allocator.free(self.blob_path);
         self.allocator.free(self.tree_path);
+        self.allocator.free(self.fast_manifest_path);
         self.allocator.free(self.staging_path);
         self.* = undefined;
     }
@@ -80,6 +87,18 @@ pub const InstallSession = struct {
             if (!std.mem.eql(u8, &digest, &self.spec.tree_root)) {
                 return error.TreeRootMismatch;
             }
+        } else {
+            verifyFastManifest(self.allocator, self.tree_path, self.fast_manifest_path) catch |err| switch (err) {
+                error.FileNotFound => {
+                    // Backward-compatible fallback: validate once in strict mode and mint fast manifest.
+                    const digest = try computeTreeRootForDir(self.allocator, self.tree_path);
+                    if (!std.mem.eql(u8, &digest, &self.spec.tree_root)) {
+                        return error.TreeRootMismatch;
+                    }
+                    try writeFastManifest(self.allocator, self.tree_path, self.fast_manifest_path);
+                },
+                else => return err,
+            };
         }
 
         self.cache_hit = true;
@@ -189,6 +208,7 @@ pub const InstallSession = struct {
         };
 
         try makeReadOnlyRecursively(self.allocator, self.tree_path);
+        try writeFastManifest(self.allocator, self.tree_path, self.fast_manifest_path);
         self.cache_hit = true;
     }
 };
@@ -548,6 +568,172 @@ fn normalizeTreeEntryMode(mode: std.fs.File.Mode) u32 {
     return 0o644;
 }
 
+const FastCheck = struct {
+    path: []u8,
+    digest: [32]u8,
+};
+
+fn writeFastManifest(allocator: std.mem.Allocator, tree_path: []const u8, manifest_path: []const u8) !void {
+    const checks = try collectFastChecks(allocator, tree_path);
+    defer {
+        for (checks) |check| allocator.free(check.path);
+        allocator.free(checks);
+    }
+
+    var write_buffer: [8 * 1024]u8 = undefined;
+    var atomic_file = try std.fs.cwd().atomicFile(manifest_path, .{
+        .mode = 0o644,
+        .make_path = true,
+        .write_buffer = &write_buffer,
+    });
+    defer atomic_file.deinit();
+
+    var writer = &atomic_file.file_writer.interface;
+    try writer.writeAll("{\"version\":1,\"checks\":[");
+    for (checks, 0..) |check, idx| {
+        if (idx != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"path\":");
+        try std.json.Stringify.encodeJsonString(check.path, .{}, writer);
+        try writer.writeAll(",\"sha256\":\"");
+        const digest_hex = std.fmt.bytesToHex(check.digest, .lower);
+        try writer.writeAll(digest_hex[0..]);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeAll("]}");
+    try atomic_file.finish();
+}
+
+fn verifyFastManifest(allocator: std.mem.Allocator, tree_path: []const u8, manifest_path: []const u8) !void {
+    const raw = try std.fs.cwd().readFileAlloc(allocator, manifest_path, 1024 * 1024);
+    defer allocator.free(raw);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return error.TreeRootMismatch;
+    defer parsed.deinit();
+
+    const root = expectObject(parsed.value) catch return error.TreeRootMismatch;
+    const version = expectIntegerField(root, "version") catch return error.TreeRootMismatch;
+    if (version != 1) return error.TreeRootMismatch;
+    const checks_array = expectArrayField(root, "checks") catch return error.TreeRootMismatch;
+    if (checks_array.items.len == 0) return error.TreeRootMismatch;
+
+    for (checks_array.items) |item| {
+        const obj = expectObject(item) catch return error.TreeRootMismatch;
+        const rel_path = expectStringField(obj, "path") catch return error.TreeRootMismatch;
+        if (!isValidFastRelativePath(rel_path)) return error.TreeRootMismatch;
+        const expected_hex = expectStringField(obj, "sha256") catch return error.TreeRootMismatch;
+        const expected = parseHexFixed32(expected_hex) catch return error.TreeRootMismatch;
+
+        const abs_path = try std.fs.path.join(allocator, &.{ tree_path, rel_path });
+        defer allocator.free(abs_path);
+        const actual = hashFileAtPath(abs_path) catch return error.TreeRootMismatch;
+        if (!std.mem.eql(u8, &actual.digest, &expected)) return error.TreeRootMismatch;
+    }
+}
+
+fn collectFastChecks(allocator: std.mem.Allocator, tree_path: []const u8) ![]FastCheck {
+    const prefer_windows = builtin.os.tag == .windows;
+    const preferred = if (prefer_windows)
+        [_][]const u8{ "zig.exe", "bin/zig.exe" }
+    else
+        [_][]const u8{ "zig", "bin/zig" };
+
+    var checks: std.ArrayList(FastCheck) = .empty;
+    errdefer {
+        for (checks.items) |item| allocator.free(item.path);
+        checks.deinit(allocator);
+    }
+
+    for (preferred) |rel| {
+        const abs = try std.fs.path.join(allocator, &.{ tree_path, rel });
+        defer allocator.free(abs);
+        if (try pathIsFile(abs)) {
+            const digest = (try hashFileAtPath(abs)).digest;
+            try checks.append(allocator, .{
+                .path = try allocator.dupe(u8, rel),
+                .digest = digest,
+            });
+            return checks.toOwnedSlice(allocator);
+        }
+    }
+
+    var root_dir = try std.fs.cwd().openDir(tree_path, .{ .iterate = true });
+    defer root_dir.close();
+    var walker = try root_dir.walk(allocator);
+    defer walker.deinit();
+
+    var first_rel: ?[]u8 = null;
+    defer if (first_rel) |path| allocator.free(path);
+
+    while (try walker.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (first_rel == null or std.mem.order(u8, entry.path, first_rel.?) == .lt) {
+            if (first_rel) |old| allocator.free(old);
+            first_rel = try allocator.dupe(u8, entry.path);
+        }
+    }
+
+    const rel = first_rel orelse return error.FileNotFound;
+    const abs = try std.fs.path.join(allocator, &.{ tree_path, rel });
+    defer allocator.free(abs);
+    const digest = (try hashFileAtPath(abs)).digest;
+    try checks.append(allocator, .{
+        .path = try allocator.dupe(u8, rel),
+        .digest = digest,
+    });
+    return checks.toOwnedSlice(allocator);
+}
+
+fn parseHexFixed32(text: []const u8) ![32]u8 {
+    if (text.len != 64) return error.InvalidHexLength;
+    var out: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, text) catch return error.InvalidHexChar;
+    return out;
+}
+
+fn isValidFastRelativePath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (std.fs.path.isAbsolute(path)) return false;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return false;
+    if (std.mem.indexOfScalar(u8, path, ':') != null) return false;
+
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) return false;
+    }
+    return true;
+}
+
+fn expectObject(value: std.json.Value) !std.json.ObjectMap {
+    return switch (value) {
+        .object => |obj| obj,
+        else => error.ExpectedObject,
+    };
+}
+
+fn expectArrayField(object: std.json.ObjectMap, key: []const u8) !std.json.Array {
+    const value = object.get(key) orelse return error.MissingRequiredField;
+    return switch (value) {
+        .array => |arr| arr,
+        else => error.ExpectedArray,
+    };
+}
+
+fn expectStringField(object: std.json.ObjectMap, key: []const u8) ![]const u8 {
+    const value = object.get(key) orelse return error.MissingRequiredField;
+    return switch (value) {
+        .string => |str| str,
+        else => error.ExpectedString,
+    };
+}
+
+fn expectIntegerField(object: std.json.ObjectMap, key: []const u8) !i64 {
+    const value = object.get(key) orelse return error.MissingRequiredField;
+    return switch (value) {
+        .integer => |number| number,
+        else => error.ExpectedInteger,
+    };
+}
+
 fn pathIsDirectory(path: []const u8) !bool {
     var dir = std.fs.cwd().openDir(path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return false,
@@ -697,9 +883,75 @@ test "install session materializes and seals local blob source" {
     defer allocator.free(installed_tree);
     const installed_blob = try std.fmt.allocPrint(allocator, "{s}/cas/official/tree/{s}/toolchain.blob", .{ cache_root, root_hex[0..] });
     defer allocator.free(installed_blob);
+    const fast_manifest = try std.fmt.allocPrint(allocator, "{s}/cas/official/fast/tree/{s}.json", .{ cache_root, root_hex[0..] });
+    defer allocator.free(fast_manifest);
 
     try std.testing.expect(try pathIsDirectory(installed_tree));
     try std.testing.expect(try pathIsFile(installed_blob));
+    try std.testing.expect(try pathIsFile(fast_manifest));
+}
+
+test "resolveToolchain fast detects sidecar hash mismatch" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "source.blob",
+        .data = "toolchain-bytes-v1",
+    });
+    try tmp.dir.makePath("expected");
+    try tmp.dir.copyFile("source.blob", tmp.dir, "expected/toolchain.blob", .{});
+
+    const sub = tmp.sub_path[0..];
+    const source_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/source.blob", .{sub});
+    defer allocator.free(source_rel);
+    const expected_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/expected", .{sub});
+    defer allocator.free(expected_rel);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache-fast", .{sub});
+    defer allocator.free(cache_root);
+
+    const blob_info = try hashFileAtPath(source_rel);
+    const tree_root = try computeTreeRootForDir(allocator, expected_rel);
+
+    var spec: validator.ToolchainSpec = .{
+        .id = try allocator.dupe(u8, "zigcc-fast"),
+        .source = try allocator.dupe(u8, source_rel),
+        .blob_sha256 = blob_info.digest,
+        .tree_root = tree_root,
+        .size = blob_info.size,
+    };
+    defer spec.deinit(allocator);
+
+    var strict_session = try InstallSession.init(allocator, &spec, .{
+        .cache_root = cache_root,
+        .verify_mode = .strict,
+    });
+    defer strict_session.deinit();
+
+    try strict_session.resolveToolchain();
+    try strict_session.downloadBlob();
+    try strict_session.verifyBlob();
+    try strict_session.unpackStaging();
+    try strict_session.computeTreeRoot();
+    try strict_session.verifyTreeRoot();
+    try strict_session.sealCacheObject();
+
+    const root_hex = std.fmt.bytesToHex(spec.tree_root, .lower);
+    const fast_manifest = try std.fmt.allocPrint(allocator, "{s}/cas/official/fast/tree/{s}.json", .{ cache_root, root_hex[0..] });
+    defer allocator.free(fast_manifest);
+    try std.fs.cwd().writeFile(.{
+        .sub_path = fast_manifest,
+        .data = "{\"version\":1,\"checks\":[{\"path\":\"toolchain.blob\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}",
+    });
+
+    var fast_session = try InstallSession.init(allocator, &spec, .{
+        .cache_root = cache_root,
+        .verify_mode = .fast,
+    });
+    defer fast_session.deinit();
+
+    try std.testing.expectError(error.TreeRootMismatch, fast_session.resolveToolchain());
 }
 
 test "downloadBlob rejects insecure http source by default" {
