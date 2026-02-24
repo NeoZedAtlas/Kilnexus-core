@@ -95,10 +95,13 @@ pub const FsCopyOp = struct {
 pub const CCompileOp = struct {
     src_path: []u8,
     out_path: []u8,
+    args: [][]u8,
 
     pub fn deinit(self: *CCompileOp, allocator: std.mem.Allocator) void {
         allocator.free(self.src_path);
         allocator.free(self.out_path);
+        for (self.args) |arg| allocator.free(arg);
+        allocator.free(self.args);
         self.* = undefined;
     }
 };
@@ -106,11 +109,14 @@ pub const CCompileOp = struct {
 pub const ZigLinkOp = struct {
     object_paths: [][]u8,
     out_path: []u8,
+    args: [][]u8,
 
     pub fn deinit(self: *ZigLinkOp, allocator: std.mem.Allocator) void {
         for (self.object_paths) |path| allocator.free(path);
         allocator.free(self.object_paths);
         allocator.free(self.out_path);
+        for (self.args) |arg| allocator.free(arg);
+        allocator.free(self.args);
         self.* = undefined;
     }
 };
@@ -348,6 +354,8 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
             const out_text = try expectNonEmptyString(obj, "out");
             try validateWorkspaceRelativePath(src_text);
             try validateWorkspaceRelativePath(out_text);
+            const args = try parseOptionalArgs(allocator, obj, isAllowedCompileArg);
+            errdefer freeOwnedStrings(allocator, args);
 
             const src_path = try allocator.dupe(u8, src_text);
             errdefer allocator.free(src_path);
@@ -358,6 +366,7 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
                 .c_compile = .{
                     .src_path = src_path,
                     .out_path = out_path,
+                    .args = args,
                 },
             });
             continue;
@@ -388,11 +397,14 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
 
             const out_path = try allocator.dupe(u8, out_text);
             errdefer allocator.free(out_path);
+            const args = try parseOptionalArgs(allocator, obj, isAllowedLinkArg);
+            errdefer freeOwnedStrings(allocator, args);
 
             try ops.append(allocator, .{
                 .zig_link = .{
                     .object_paths = object_paths,
                     .out_path = out_path,
+                    .args = args,
                 },
             });
             continue;
@@ -534,6 +546,71 @@ fn validateOutputPath(path: []const u8) !void {
             return error.InvalidOutputPath;
         }
     }
+}
+
+fn parseOptionalArgs(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    comptime allowed: fn ([]const u8) bool,
+) ![][]u8 {
+    const value = object.get("args") orelse return allocator.alloc([]u8, 0);
+    const array = try expectArray(value, "args");
+
+    var args: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (args.items) |arg| allocator.free(arg);
+        args.deinit(allocator);
+    }
+
+    for (array.items) |arg_value| {
+        const arg_text = try expectString(arg_value, "arg");
+        if (arg_text.len == 0) return error.ValueInvalid;
+        if (!allowed(arg_text)) return error.ValueInvalid;
+        try args.append(allocator, try allocator.dupe(u8, arg_text));
+    }
+    return args.toOwnedSlice(allocator);
+}
+
+fn freeOwnedStrings(allocator: std.mem.Allocator, items: [][]u8) void {
+    for (items) |item| allocator.free(item);
+    allocator.free(items);
+}
+
+fn isAllowedCompileArg(arg: []const u8) bool {
+    const allowed = [_][]const u8{
+        "-O0",
+        "-O1",
+        "-O2",
+        "-O3",
+        "-Os",
+        "-Oz",
+        "-g",
+        "-g0",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-std=c89",
+        "-std=c99",
+        "-std=c11",
+        "-std=c17",
+    };
+    for (allowed) |item| {
+        if (std.mem.eql(u8, arg, item)) return true;
+    }
+    return false;
+}
+
+fn isAllowedLinkArg(arg: []const u8) bool {
+    const allowed = [_][]const u8{
+        "-static",
+        "-s",
+        "-Wl,--gc-sections",
+        "-Wl,--strip-all",
+    };
+    for (allowed) |item| {
+        if (std.mem.eql(u8, arg, item)) return true;
+    }
+    return false;
 }
 
 fn validateWorkspaceRelativePath(path: []const u8) !void {
@@ -910,8 +987,18 @@ test "parseBuildSpec parses c.compile and zig.link operations" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "build": [
-        \\    { "op": "knx.c.compile", "src": "src/main.c", "out": "obj/main.o" },
-        \\    { "op": "knx.zig.link", "objects": ["obj/main.o"], "out": "kilnexus-out/app" }
+        \\    {
+        \\      "op": "knx.c.compile",
+        \\      "src": "src/main.c",
+        \\      "out": "obj/main.o",
+        \\      "args": ["-O2", "-std=c11"]
+        \\    },
+        \\    {
+        \\      "op": "knx.zig.link",
+        \\      "objects": ["obj/main.o"],
+        \\      "out": "kilnexus-out/app",
+        \\      "args": ["-static"]
+        \\    }
         \\  ],
         \\  "outputs": [
         \\    { "path": "kilnexus-out/app", "mode": "0755" }
@@ -927,6 +1014,9 @@ test "parseBuildSpec parses c.compile and zig.link operations" {
         .c_compile => |compile| {
             try std.testing.expectEqualStrings("src/main.c", compile.src_path);
             try std.testing.expectEqualStrings("obj/main.o", compile.out_path);
+            try std.testing.expectEqual(@as(usize, 2), compile.args.len);
+            try std.testing.expectEqualStrings("-O2", compile.args[0]);
+            try std.testing.expectEqualStrings("-std=c11", compile.args[1]);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -935,7 +1025,47 @@ test "parseBuildSpec parses c.compile and zig.link operations" {
             try std.testing.expectEqual(@as(usize, 1), link.object_paths.len);
             try std.testing.expectEqualStrings("obj/main.o", link.object_paths[0]);
             try std.testing.expectEqualStrings("kilnexus-out/app", link.out_path);
+            try std.testing.expectEqual(@as(usize, 1), link.args.len);
+            try std.testing.expectEqualStrings("-static", link.args[0]);
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "parseBuildSpec rejects disallowed compile arg" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    {
+        \\      "op": "knx.c.compile",
+        \\      "src": "src/main.c",
+        \\      "out": "obj/main.o",
+        \\      "args": ["-fplugin=evil.so"]
+        \\    }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.ValueInvalid, parseBuildSpec(allocator, json));
 }

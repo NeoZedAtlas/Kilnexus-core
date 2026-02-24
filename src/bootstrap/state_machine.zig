@@ -696,7 +696,7 @@ test "attemptRunWithOptions maps missing toolchain for c.compile to build failur
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "build": [
-        \\    { "op": "knx.c.compile" }
+        \\    { "op": "knx.c.compile", "src": "src/main.c", "out": "obj/main.o" }
         \\  ],
         \\  "outputs": [
         \\    { "path": "kilnexus-out/app", "mode": "0755" }

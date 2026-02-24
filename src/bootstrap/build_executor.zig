@@ -74,12 +74,16 @@ fn executeCCompile(
     const argv = [_][]const u8{
         zig_exe,
         "cc",
-        "-c",
-        compile.src_path,
-        "-o",
-        compile.out_path,
     };
-    try runCommand(allocator, workspace_cwd, &argv, max_output_bytes);
+    var full_argv: std.ArrayList([]const u8) = .empty;
+    defer full_argv.deinit(allocator);
+    try full_argv.appendSlice(allocator, &argv);
+    for (compile.args) |arg| try full_argv.append(allocator, arg);
+    try full_argv.append(allocator, "-c");
+    try full_argv.append(allocator, compile.src_path);
+    try full_argv.append(allocator, "-o");
+    try full_argv.append(allocator, compile.out_path);
+    try runCommand(allocator, workspace_cwd, full_argv.items, max_output_bytes);
 }
 
 fn executeZigLink(
@@ -99,6 +103,7 @@ fn executeZigLink(
     defer argv.deinit(allocator);
     try argv.append(allocator, zig_exe);
     try argv.append(allocator, "cc");
+    for (link.args) |arg| try argv.append(allocator, arg);
     for (link.object_paths) |obj| try argv.append(allocator, obj);
     try argv.append(allocator, "-o");
     try argv.append(allocator, link.out_path);
@@ -220,6 +225,7 @@ test "executeBuildGraph reports missing toolchain for c.compile" {
         .c_compile = .{
             .src_path = try allocator.dupe(u8, "src/main.c"),
             .out_path = try allocator.dupe(u8, "obj/main.o"),
+            .args = try allocator.alloc([]u8, 0),
         },
     };
     var build_spec: validator.BuildSpec = .{ .ops = ops };
