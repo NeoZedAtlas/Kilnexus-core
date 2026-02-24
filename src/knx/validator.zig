@@ -61,6 +61,26 @@ pub const WorkspaceSpec = struct {
     }
 };
 
+pub const OutputEntry = struct {
+    path: []u8,
+    mode: u16,
+
+    pub fn deinit(self: *OutputEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.* = undefined;
+    }
+};
+
+pub const OutputSpec = struct {
+    entries: []OutputEntry,
+
+    pub fn deinit(self: *OutputSpec, allocator: std.mem.Allocator) void {
+        for (self.entries) |*entry| entry.deinit(allocator);
+        allocator.free(self.entries);
+        self.* = undefined;
+    }
+};
+
 pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []const u8) !ValidationSummary {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
     defer parsed.deinit();
@@ -95,8 +115,7 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
     for (outputs.items) |entry| {
         const output = try expectObject(entry, "output");
         const path = try expectNonEmptyString(output, "path");
-        if (!std.mem.startsWith(u8, path, "kilnexus-out/")) return error.InvalidOutputPath;
-        if (std.mem.indexOf(u8, path, "..") != null) return error.InvalidOutputPath;
+        try validateOutputPath(path);
         const mode = try expectNonEmptyString(output, "mode");
         try expectModeString(mode);
     }
@@ -180,6 +199,45 @@ pub fn parseWorkspaceSpec(allocator: std.mem.Allocator, canonical_json: []const 
 
 pub fn parseWorkspaceSpecStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!WorkspaceSpec {
     return parseWorkspaceSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
+}
+
+pub fn parseOutputSpec(allocator: std.mem.Allocator, canonical_json: []const u8) !OutputSpec {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
+    defer parsed.deinit();
+
+    const root = try expectObject(parsed.value, "root");
+    const outputs = try expectArrayField(root, "outputs");
+    if (outputs.items.len == 0) return error.OutputsEmpty;
+
+    var entries: std.ArrayList(OutputEntry) = .empty;
+    errdefer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    for (outputs.items) |item| {
+        const obj = try expectObject(item, "output");
+        const path_text = try expectNonEmptyString(obj, "path");
+        try validateOutputPath(path_text);
+        const mode_text = try expectNonEmptyString(obj, "mode");
+        const mode = try parseOutputMode(mode_text);
+
+        const path = try allocator.dupe(u8, path_text);
+        errdefer allocator.free(path);
+
+        try entries.append(allocator, .{
+            .path = path,
+            .mode = mode,
+        });
+    }
+
+    return .{
+        .entries = try entries.toOwnedSlice(allocator),
+    };
+}
+
+pub fn parseOutputSpecStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!OutputSpec {
+    return parseOutputSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
 }
 
 pub fn computeKnxDigestHex(canonical_json: []const u8) [64]u8 {
@@ -276,6 +334,32 @@ fn expectModeString(value: []const u8) !void {
     if (value[0] != '0') return error.InvalidMode;
     for (value[1..]) |ch| {
         if (ch < '0' or ch > '7') return error.InvalidMode;
+    }
+}
+
+fn parseOutputMode(text: []const u8) !u16 {
+    try expectModeString(text);
+    var mode: u16 = 0;
+    for (text[1..]) |ch| {
+        mode = (mode << 3) | @as(u16, ch - '0');
+    }
+    return mode;
+}
+
+fn validateOutputPath(path: []const u8) !void {
+    const prefix = "kilnexus-out/";
+    if (!std.mem.startsWith(u8, path, prefix)) return error.InvalidOutputPath;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return error.InvalidOutputPath;
+    if (std.mem.indexOfScalar(u8, path, ':') != null) return error.InvalidOutputPath;
+
+    const rel = path[prefix.len..];
+    if (rel.len == 0) return error.InvalidOutputPath;
+
+    var it = std.mem.splitScalar(u8, rel, '/');
+    while (it.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) {
+            return error.InvalidOutputPath;
+        }
     }
 }
 
@@ -537,4 +621,39 @@ test "parseWorkspaceSpec parses inputs and deps entries" {
     try std.testing.expect(spec.entries[1].cas_sha256 != null);
     try std.testing.expectEqual(CasDomain.third_party, spec.entries[1].cas_domain);
     try std.testing.expect(spec.entries[1].is_dependency);
+}
+
+test "parseOutputSpec parses output entries" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseOutputSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), spec.entries.len);
+    try std.testing.expectEqualStrings("kilnexus-out/app", spec.entries[0].path);
+    try std.testing.expectEqual(@as(u16, 0o755), spec.entries[0].mode);
 }

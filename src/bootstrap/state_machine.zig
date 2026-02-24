@@ -6,6 +6,7 @@ const mini_tuf = @import("../trust/mini_tuf.zig");
 const kx_error = @import("../errors/kx_error.zig");
 const toolchain_installer = @import("toolchain_installer.zig");
 const workspace_projector = @import("workspace_projector.zig");
+const output_publisher = @import("output_publisher.zig");
 
 pub const State = enum {
     init,
@@ -64,6 +65,7 @@ pub const RunOptions = struct {
     trust_metadata_dir: ?[]const u8 = "trust",
     trust_state_path: ?[]const u8 = ".kilnexus-trust-state.json",
     cache_root: []const u8 = ".kilnexus-cache",
+    output_root: []const u8 = "kilnexus-out",
 };
 
 pub fn runFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) !RunResult {
@@ -172,6 +174,12 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         return err;
     };
     defer workspace_spec.deinit(allocator);
+    var output_spec = validator.parseOutputSpecStrict(allocator, parsed.canonical_json) catch |err| {
+        failed_at.* = .parse_knxfile;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+    defer output_spec.deinit(allocator);
     const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
 
     var install_session: ?toolchain_installer.InstallSession = null;
@@ -275,7 +283,21 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
     errdefer allocator.free(workspace_cwd);
 
     try push(&trace, allocator, .verify_outputs);
+    output_publisher.verifyWorkspaceOutputs(allocator, workspace_cwd, &output_spec) catch |err| {
+        failed_at.* = .verify_outputs;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+
     try push(&trace, allocator, .atomic_publish);
+    output_publisher.atomicPublish(allocator, workspace_cwd, &output_spec, build_id, .{
+        .output_root = options.output_root,
+    }) catch |err| {
+        failed_at.* = .atomic_publish;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+
     try push(&trace, allocator, .done);
 
     return .{
@@ -358,32 +380,60 @@ fn push(trace: *std.ArrayList(State), allocator: std.mem.Allocator, state: State
 
 test "run completes bootstrap happy path" {
     const allocator = std.testing.allocator;
-    const source =
-        \\{
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project");
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/app",
+        .data = "artifact\n",
+    });
+
+    const host_source = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/app", .{tmp.sub_path[0..]});
+    defer allocator.free(host_source);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
+    defer allocator.free(cache_root);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/final/kilnexus-out", .{tmp.sub_path[0..]});
+    defer allocator.free(output_root);
+
+    const source = try std.fmt.allocPrint(
+        allocator,
+        \\{{
         \\  "version": 1,
         \\  "target": "x86_64-unknown-linux-musl",
-        \\  "toolchain": {
+        \\  "toolchain": {{
         \\    "id": "zigcc-0.14.0",
         \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         \\    "size": 1
-        \\  },
-        \\  "policy": {
+        \\  }},
+        \\  "policy": {{
         \\    "network": "off",
         \\    "clock": "fixed"
-        \\  },
-        \\  "env": {
+        \\  }},
+        \\  "env": {{
         \\    "TZ": "UTC",
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
-        \\  },
+        \\  }},
+        \\  "inputs": [
+        \\    {{ "path": "kilnexus-out/app", "source": "{s}" }}
+        \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    {{ "path": "kilnexus-out/app", "mode": "0755" }}
         \\  ]
-        \\}
-    ;
+        \\}}
+    ,
+        .{host_source},
+    );
+    defer allocator.free(source);
 
-    var result = try run(allocator, source);
+    var result = try runWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+        .cache_root = cache_root,
+        .output_root = output_root,
+    });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(State.done, result.final_state);
@@ -393,6 +443,12 @@ test "run completes bootstrap happy path" {
     try std.testing.expectEqual(validator.VerifyMode.strict, result.verify_mode);
     try std.testing.expectEqual(@as(usize, 64), result.knx_digest_hex.len);
     try std.testing.expect(result.workspace_cwd.len > 0);
+
+    const published = try std.fs.path.join(allocator, &.{ output_root, "app" });
+    defer allocator.free(published);
+    const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("artifact\n", bytes);
 }
 
 test "run fails on malformed lockfile" {
