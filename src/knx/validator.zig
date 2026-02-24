@@ -31,6 +31,36 @@ pub const ToolchainSpec = struct {
     }
 };
 
+pub const CasDomain = enum {
+    official,
+    third_party,
+    local,
+};
+
+pub const WorkspaceEntry = struct {
+    mount_path: []u8,
+    host_source: ?[]u8 = null,
+    cas_sha256: ?[32]u8 = null,
+    cas_domain: CasDomain = .local,
+    is_dependency: bool = false,
+
+    pub fn deinit(self: *WorkspaceEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.mount_path);
+        if (self.host_source) |source| allocator.free(source);
+        self.* = undefined;
+    }
+};
+
+pub const WorkspaceSpec = struct {
+    entries: []WorkspaceEntry,
+
+    pub fn deinit(self: *WorkspaceSpec, allocator: std.mem.Allocator) void {
+        for (self.entries) |*entry| entry.deinit(allocator);
+        allocator.free(self.entries);
+        self.* = undefined;
+    }
+};
+
 pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []const u8) !ValidationSummary {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
     defer parsed.deinit();
@@ -122,6 +152,36 @@ pub fn parseToolchainSpecStrict(allocator: std.mem.Allocator, canonical_json: []
     return parseToolchainSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
 }
 
+pub fn parseWorkspaceSpec(allocator: std.mem.Allocator, canonical_json: []const u8) !WorkspaceSpec {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, canonical_json, .{});
+    defer parsed.deinit();
+
+    const root = try expectObject(parsed.value, "root");
+
+    var entries: std.ArrayList(WorkspaceEntry) = .empty;
+    errdefer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    if (root.get("inputs")) |inputs_value| {
+        const inputs = try expectArray(inputs_value, "inputs");
+        try parseWorkspaceEntries(allocator, &entries, inputs, false);
+    }
+    if (root.get("deps")) |deps_value| {
+        const deps = try expectArray(deps_value, "deps");
+        try parseWorkspaceEntries(allocator, &entries, deps, true);
+    }
+
+    return .{
+        .entries = try entries.toOwnedSlice(allocator),
+    };
+}
+
+pub fn parseWorkspaceSpecStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!WorkspaceSpec {
+    return parseWorkspaceSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
+}
+
 pub fn computeKnxDigestHex(canonical_json: []const u8) [64]u8 {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(canonical_json, &digest, .{});
@@ -134,6 +194,54 @@ fn parseVerifyMode(policy: std.json.ObjectMap) !VerifyMode {
     if (std.mem.eql(u8, value, "strict")) return .strict;
     if (std.mem.eql(u8, value, "fast")) return .fast;
     return error.InvalidVerifyMode;
+}
+
+fn parseWorkspaceEntries(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(WorkspaceEntry),
+    items: std.json.Array,
+    is_dependency: bool,
+) !void {
+    for (items.items) |item| {
+        const obj = try expectObject(item, "workspace entry");
+        const mount_path_text = try expectNonEmptyString(obj, "path");
+        const mount_path = try allocator.dupe(u8, mount_path_text);
+        errdefer allocator.free(mount_path);
+
+        var entry: WorkspaceEntry = .{
+            .mount_path = mount_path,
+            .is_dependency = is_dependency,
+        };
+        errdefer entry.deinit(allocator);
+
+        const has_source = obj.get("source") != null;
+        const has_cas = obj.get("cas_sha256") != null;
+        if (has_source == has_cas) {
+            return error.ValueInvalid;
+        }
+
+        if (has_source) {
+            const source_text = try expectNonEmptyString(obj, "source");
+            entry.host_source = try allocator.dupe(u8, source_text);
+        } else {
+            const cas_text = try expectNonEmptyString(obj, "cas_sha256");
+            entry.cas_sha256 = try parseHexFixed(32, cas_text);
+
+            if (obj.get("cas_domain")) |domain_value| {
+                const domain_text = try expectString(domain_value, "cas_domain");
+                entry.cas_domain = parseCasDomain(domain_text) orelse return error.ValueInvalid;
+            }
+        }
+
+        try entries.append(allocator, entry);
+    }
+}
+
+fn parseCasDomain(text: []const u8) ?CasDomain {
+    if (std.mem.eql(u8, text, "official")) return .official;
+    if (std.mem.eql(u8, text, "third_party")) return .third_party;
+    if (std.mem.eql(u8, text, "local")) return .local;
+    return null;
 }
 
 fn parsePositiveU64(object: std.json.ObjectMap, key: []const u8) !u64 {
@@ -380,4 +488,53 @@ test "parseToolchainSpec extracts source and hashes" {
     try std.testing.expect(spec.source != null);
     try std.testing.expectEqualStrings("file://tmp/toolchain.blob", spec.source.?);
     try std.testing.expectEqual(@as(u64, 1), spec.size);
+}
+
+test "parseWorkspaceSpec parses inputs and deps entries" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "inputs": [
+        \\    { "path": "src/main.c", "source": "project/src/main.c" }
+        \\  ],
+        \\  "deps": [
+        \\    {
+        \\      "path": "deps/libc.a",
+        \\      "cas_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        \\      "cas_domain": "third_party"
+        \\    }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseWorkspaceSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), spec.entries.len);
+    try std.testing.expectEqualStrings("src/main.c", spec.entries[0].mount_path);
+    try std.testing.expect(spec.entries[0].host_source != null);
+    try std.testing.expect(!spec.entries[0].is_dependency);
+    try std.testing.expect(spec.entries[1].cas_sha256 != null);
+    try std.testing.expectEqual(CasDomain.third_party, spec.entries[1].cas_domain);
+    try std.testing.expect(spec.entries[1].is_dependency);
 }

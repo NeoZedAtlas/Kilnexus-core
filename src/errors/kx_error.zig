@@ -391,7 +391,7 @@ pub fn normalizeBuild(err: anyerror) BuildError {
         return error.SandboxViolation;
     }
 
-    if (err == error.GraphInvalid or err == error.InvalidBuildGraph or err == error.DependencyCycle) {
+    if (err == error.GraphInvalid or err == error.InvalidBuildGraph or err == error.DependencyCycle or err == error.DuplicateMountPath) {
         return error.GraphInvalid;
     }
 

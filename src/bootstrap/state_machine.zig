@@ -5,6 +5,7 @@ const validator = @import("../knx/validator.zig");
 const mini_tuf = @import("../trust/mini_tuf.zig");
 const kx_error = @import("../errors/kx_error.zig");
 const toolchain_installer = @import("toolchain_installer.zig");
+const workspace_projector = @import("workspace_projector.zig");
 
 pub const State = enum {
     init,
@@ -28,6 +29,7 @@ pub const State = enum {
 pub const RunResult = struct {
     trace: std.ArrayList(State),
     canonical_json: []u8,
+    workspace_cwd: []u8,
     verify_mode: validator.VerifyMode,
     knx_digest_hex: [64]u8,
     trust: mini_tuf.VerificationSummary,
@@ -36,6 +38,7 @@ pub const RunResult = struct {
     pub fn deinit(self: *RunResult, allocator: std.mem.Allocator) void {
         self.trace.deinit(allocator);
         allocator.free(self.canonical_json);
+        allocator.free(self.workspace_cwd);
         self.* = undefined;
     }
 };
@@ -60,6 +63,7 @@ pub fn runFromPath(allocator: std.mem.Allocator, path: []const u8) !RunResult {
 pub const RunOptions = struct {
     trust_metadata_dir: ?[]const u8 = "trust",
     trust_state_path: ?[]const u8 = ".kilnexus-trust-state.json",
+    cache_root: []const u8 = ".kilnexus-cache",
 };
 
 pub fn runFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) !RunResult {
@@ -162,12 +166,18 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         return err;
     };
     defer toolchain_spec.deinit(allocator);
+    var workspace_spec = validator.parseWorkspaceSpecStrict(allocator, parsed.canonical_json) catch |err| {
+        failed_at.* = .parse_knxfile;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+    defer workspace_spec.deinit(allocator);
     const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
 
     var install_session: ?toolchain_installer.InstallSession = null;
     if (toolchain_spec.source != null) {
         install_session = toolchain_installer.InstallSession.init(allocator, &toolchain_spec, .{
-            .cache_root = ".kilnexus-cache",
+            .cache_root = options.cache_root,
             .verify_mode = validation.verify_mode,
         }) catch |err| {
             failed_at.* = .resolve_toolchain;
@@ -241,6 +251,29 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
     }
 
     try push(&trace, allocator, .execute_build_graph);
+    var workspace_plan = workspace_projector.planWorkspace(allocator, &workspace_spec, .{
+        .cache_root = options.cache_root,
+    }) catch |err| {
+        failed_at.* = .execute_build_graph;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+    defer workspace_plan.deinit(allocator);
+    const build_id = try std.fmt.allocPrint(
+        allocator,
+        "{s}-{d}",
+        .{ knx_digest_hex[0..16], std.time.microTimestamp() },
+    );
+    defer allocator.free(build_id);
+    const workspace_cwd = workspace_projector.projectWorkspace(allocator, &workspace_plan, build_id, .{
+        .cache_root = options.cache_root,
+    }) catch |err| {
+        failed_at.* = .execute_build_graph;
+        push(&trace, allocator, .failed) catch {};
+        return err;
+    };
+    errdefer allocator.free(workspace_cwd);
+
     try push(&trace, allocator, .verify_outputs);
     try push(&trace, allocator, .atomic_publish);
     try push(&trace, allocator, .done);
@@ -248,6 +281,7 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
     return .{
         .trace = trace,
         .canonical_json = parsed.canonical_json,
+        .workspace_cwd = workspace_cwd,
         .verify_mode = validation.verify_mode,
         .knx_digest_hex = knx_digest_hex,
         .trust = trust_summary,
@@ -264,7 +298,7 @@ fn classifyByState(state: State, err: anyerror) kx_error.Code {
         .unpack_staging => classifyUnpack(err),
         .verify_blob => kx_error.classifyIntegrity(err),
         .compute_tree_root, .verify_tree_root => kx_error.classifyIntegrity(err),
-        .execute_build_graph => kx_error.classifyBuild(err),
+        .execute_build_graph => classifyExecute(err),
         .verify_outputs, .atomic_publish => kx_error.classifyPublish(err),
         else => .KX_INTERNAL,
     };
@@ -277,7 +311,7 @@ fn normalizeCauseByState(state: State, err: anyerror) anyerror {
         .load_trust_metadata, .verify_metadata_chain => mini_tuf.normalizeError(err),
         .parse_knxfile => parse_errors.normalize(err),
         .verify_blob, .compute_tree_root, .verify_tree_root => kx_error.normalizeIntegrity(err),
-        .execute_build_graph => kx_error.normalizeBuild(err),
+        .execute_build_graph => normalizeExecuteCause(err),
         .verify_outputs, .atomic_publish => kx_error.normalizePublish(err),
         else => err,
     };
@@ -293,6 +327,29 @@ fn normalizeUnpackCause(err: anyerror) anyerror {
     const integrity = kx_error.normalizeIntegrity(err);
     if (integrity != error.Internal) return integrity;
     return kx_error.normalizeIo(err);
+}
+
+fn classifyExecute(err: anyerror) kx_error.Code {
+    const build_code = kx_error.classifyBuild(err);
+    if (build_code != .KX_INTERNAL) return build_code;
+
+    const integrity_code = kx_error.classifyIntegrity(err);
+    if (integrity_code != .KX_INTERNAL) return integrity_code;
+
+    return kx_error.classifyIo(err);
+}
+
+fn normalizeExecuteCause(err: anyerror) anyerror {
+    const build = kx_error.normalizeBuild(err);
+    if (build != error.Internal) return build;
+
+    const integrity = kx_error.normalizeIntegrity(err);
+    if (integrity != error.Internal) return integrity;
+
+    const io = kx_error.normalizeIo(err);
+    if (io != error.Internal) return io;
+
+    return err;
 }
 
 fn push(trace: *std.ArrayList(State), allocator: std.mem.Allocator, state: State) !void {
@@ -335,6 +392,7 @@ test "run completes bootstrap happy path" {
     try std.testing.expectEqual(State.done, result.trace.items[result.trace.items.len - 1]);
     try std.testing.expectEqual(validator.VerifyMode.strict, result.verify_mode);
     try std.testing.expectEqual(@as(usize, 64), result.knx_digest_hex.len);
+    try std.testing.expect(result.workspace_cwd.len > 0);
 }
 
 test "run fails on malformed lockfile" {
@@ -480,6 +538,54 @@ test "attemptRunWithOptions fails at download when source file is missing" {
         },
         .failure => |failure| {
             try std.testing.expectEqual(State.download_blob, failure.at);
+            try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
+            try std.testing.expectEqual(error.IoNotFound, failure.cause);
+        },
+    }
+}
+
+test "attemptRunWithOptions fails in execute stage when declared source is missing" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "inputs": [
+        \\    { "path": "src/main.c", "source": "__missing_source__.c" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    const attempt = attemptRunWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+    });
+
+    switch (attempt) {
+        .success => |*result| {
+            defer result.deinit(allocator);
+            return error.ExpectedFailure;
+        },
+        .failure => |failure| {
+            try std.testing.expectEqual(State.execute_build_graph, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
             try std.testing.expectEqual(error.IoNotFound, failure.cause);
         },

@@ -42,6 +42,7 @@ pub fn main() !void {
             );
             std.debug.print("Verify mode: {s}\n", .{@tagName(run_result.verify_mode)});
             std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
+            std.debug.print("Workspace cwd: {s}\n", .{run_result.workspace_cwd});
             std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});
 
             for (run_result.trace.items) |state| {
