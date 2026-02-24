@@ -3,6 +3,7 @@ const validator = @import("../knx/validator.zig");
 
 pub const PublishOptions = struct {
     output_root: []const u8 = "kilnexus-out",
+    knx_digest_hex: ?[]const u8 = null,
 };
 
 pub fn verifyWorkspaceOutputs(
@@ -95,7 +96,7 @@ pub fn atomicPublish(
         try syncDirPath(".");
     }
 
-    try writeCurrentPointer(allocator, options.output_root, build_id);
+    try writeCurrentPointer(allocator, options.output_root, build_id, options.knx_digest_hex);
 }
 
 fn outputRelativePath(path: []const u8) ![]const u8 {
@@ -141,7 +142,12 @@ fn syncDirPath(path: []const u8) !void {
     dir.sync() catch return error.FsyncFailed;
 }
 
-fn writeCurrentPointer(allocator: std.mem.Allocator, output_root: []const u8, build_id: []const u8) !void {
+fn writeCurrentPointer(
+    allocator: std.mem.Allocator,
+    output_root: []const u8,
+    build_id: []const u8,
+    knx_digest_hex: ?[]const u8,
+) !void {
     const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
     defer allocator.free(pointer_path);
 
@@ -153,8 +159,16 @@ fn writeCurrentPointer(allocator: std.mem.Allocator, output_root: []const u8, bu
     });
     defer atomic_file.deinit();
 
-    try atomic_file.file_writer.interface.writeAll(build_id);
-    try atomic_file.file_writer.interface.writeAll("\n");
+    var writer = &atomic_file.file_writer.interface;
+    const published_at_unix_ms = std.time.milliTimestamp();
+    try writer.writeAll("{\"version\":1,\"build_id\":");
+    try std.json.Stringify.encodeJsonString(build_id, .{}, writer);
+    if (knx_digest_hex) |digest| {
+        try writer.writeAll(",\"knx_digest\":");
+        try std.json.Stringify.encodeJsonString(digest, .{}, writer);
+    }
+    try writer.print(",\"published_at_unix_ms\":{d}", .{published_at_unix_ms});
+    try writer.writeAll("}");
     try atomic_file.finish();
 
     if (std.fs.path.dirname(pointer_path)) |parent| {
@@ -216,7 +230,17 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
     defer allocator.free(pointer_path);
     const pointer = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 1024);
     defer allocator.free(pointer);
-    try std.testing.expectEqualStrings("build-test\n", pointer);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, pointer, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const build_id_val = root.get("build_id") orelse return error.TestUnexpectedResult;
+    switch (build_id_val) {
+        .string => |str| try std.testing.expectEqualStrings("build-test", str),
+        else => return error.TestUnexpectedResult,
+    }
 
     if (std.fs.has_executable_bit) {
         var published_file = try std.fs.cwd().openFile(published, .{});

@@ -315,6 +315,7 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
     try push(&trace, allocator, .atomic_publish);
     output_publisher.atomicPublish(allocator, workspace_cwd, &output_spec, build_id, .{
         .output_root = options.output_root,
+        .knx_digest_hex = knx_digest_hex[0..],
     }) catch |err| {
         failed_at.* = .atomic_publish;
         push(&trace, allocator, .failed) catch {};
@@ -489,6 +490,22 @@ test "run completes bootstrap happy path" {
     const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings("artifact\n", bytes);
+
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer_raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 2048);
+    defer allocator.free(pointer_raw);
+    const pointer_doc = try std.json.parseFromSlice(std.json.Value, allocator, pointer_raw, .{});
+    defer pointer_doc.deinit();
+    const pointer_obj = switch (pointer_doc.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const pointer_knx = switch (pointer_obj.get("knx_digest") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(result.knx_digest_hex[0..], pointer_knx);
 }
 
 test "run fails on malformed lockfile" {
