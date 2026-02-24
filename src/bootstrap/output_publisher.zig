@@ -94,6 +94,8 @@ pub fn atomicPublish(
     } else {
         try syncDirPath(".");
     }
+
+    try writeCurrentPointer(allocator, options.output_root, build_id);
 }
 
 fn outputRelativePath(path: []const u8) ![]const u8 {
@@ -137,6 +139,29 @@ fn syncDirPath(path: []const u8) !void {
     };
     defer dir.close();
     dir.sync() catch return error.FsyncFailed;
+}
+
+fn writeCurrentPointer(allocator: std.mem.Allocator, output_root: []const u8, build_id: []const u8) !void {
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+
+    var write_buffer: [2 * 1024]u8 = undefined;
+    var atomic_file = try std.fs.cwd().atomicFile(pointer_path, .{
+        .mode = 0o644,
+        .make_path = true,
+        .write_buffer = &write_buffer,
+    });
+    defer atomic_file.deinit();
+
+    try atomic_file.file_writer.interface.writeAll(build_id);
+    try atomic_file.file_writer.interface.writeAll("\n");
+    try atomic_file.finish();
+
+    if (std.fs.path.dirname(pointer_path)) |parent| {
+        try syncDirPath(parent);
+    } else {
+        try syncDirPath(".");
+    }
 }
 
 fn hashOpenFile(file: *std.fs.File) ![32]u8 {
@@ -187,6 +212,11 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
     const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings("artifact\n", bytes);
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 1024);
+    defer allocator.free(pointer);
+    try std.testing.expectEqualStrings("build-test\n", pointer);
 
     if (std.fs.has_executable_bit) {
         var published_file = try std.fs.cwd().openFile(published, .{});
