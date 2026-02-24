@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -11,7 +12,9 @@ pub fn build(b: *std.Build) void {
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{
+        .default_target = if (builtin.os.tag == .windows) .{ .abi = .gnu } else .{},
+    });
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
@@ -80,15 +83,28 @@ pub fn build(b: *std.Build) void {
         },
     });
     exe_module.addIncludePath(b.path("src/abi"));
-    exe_module.addCSourceFile(.{
-        .file = b.path("src/parser/kx_parser_stub.c"),
-        .flags = &.{},
+    const nim_build = b.addSystemCommand(&.{
+        "nim",
+        "c",
+        "--app:staticlib",
+        "--noMain:on",
+        "--mm:orc",
+        "--threads:off",
+        "--tlsEmulation:off",
+        "-d:danger",
+        "--opt:size",
+        "--verbosity:0",
+        "--hints:off",
     });
+    const nim_lib = nim_build.addPrefixedOutputFileArg("--out:", "kx_parser.lib");
+    nim_build.addFileArg(b.path("src/parser/kx_parser.nim"));
 
     const exe = b.addExecutable(.{
         .name = "Kilnexus_core",
         .root_module = exe_module,
     });
+    exe.root_module.link_libc = true;
+    exe.root_module.addObjectFile(nim_lib);
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
