@@ -1,73 +1,19 @@
 const std = @import("std");
 const kx_error = @import("../errors/kx_error.zig");
-const state_types = @import("state/types.zig");
-const state_errors = @import("state/errors.zig");
-const state_runner = @import("state/runner.zig");
+const state_api = @import("state/api.zig");
 
-pub const State = state_types.State;
-pub const RunResult = state_types.RunResult;
-pub const RunFailure = state_types.RunFailure;
-pub const RunAttempt = state_types.RunAttempt;
-pub const RunOptions = state_types.RunOptions;
+pub const State = state_api.State;
+pub const RunResult = state_api.RunResult;
+pub const RunFailure = state_api.RunFailure;
+pub const RunAttempt = state_api.RunAttempt;
+pub const RunOptions = state_api.RunOptions;
 
-const max_knxfile_bytes: usize = state_types.max_knxfile_bytes;
-
-pub fn runFromPath(allocator: std.mem.Allocator, path: []const u8) !RunResult {
-    return runFromPathWithOptions(allocator, path, .{});
-}
-
-pub fn runFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) !RunResult {
-    const source = try std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes);
-    defer allocator.free(source);
-    var failed_at: State = .init;
-    return runWithOptionsCore(allocator, source, options, &failed_at);
-}
-
-pub fn run(allocator: std.mem.Allocator, source: []const u8) !RunResult {
-    return runWithOptions(allocator, source, .{
-        .trust_metadata_dir = null,
-        .trust_state_path = null,
-    });
-}
-
-pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) !RunResult {
-    var failed_at: State = .init;
-    return runWithOptionsCore(allocator, source, options, &failed_at);
-}
-
-pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) RunAttempt {
-    const source = std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes) catch |err| {
-        const cause = kx_error.normalizeIo(err);
-        return .{
-            .failure = .{
-                .at = .init,
-                .code = kx_error.classifyIo(cause),
-                .cause = cause,
-            },
-        };
-    };
-    defer allocator.free(source);
-    return attemptRunWithOptions(allocator, source, options);
-}
-
-pub fn attemptRunWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) RunAttempt {
-    var failed_at: State = .init;
-    const result = runWithOptionsCore(allocator, source, options, &failed_at) catch |err| {
-        const cause = state_errors.normalizeCauseByState(failed_at, err);
-        return .{
-            .failure = .{
-                .at = failed_at,
-                .code = state_errors.classifyByState(failed_at, cause),
-                .cause = cause,
-            },
-        };
-    };
-    return .{ .success = result };
-}
-
-fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options: RunOptions, failed_at: *State) !RunResult {
-    return state_runner.runWithOptionsCore(allocator, source, options, failed_at);
-}
+pub const runFromPath = state_api.runFromPath;
+pub const runFromPathWithOptions = state_api.runFromPathWithOptions;
+pub const run = state_api.run;
+pub const runWithOptions = state_api.runWithOptions;
+pub const attemptRunFromPathWithOptions = state_api.attemptRunFromPathWithOptions;
+pub const attemptRunWithOptions = state_api.attemptRunWithOptions;
 
 test "run completes bootstrap happy path" {
     const allocator = std.testing.allocator;
@@ -644,34 +590,6 @@ test "attemptRunWithOptions rejects build writes into mounted input path" {
             try std.testing.expectEqual(error.ValueInvalid, failure.cause);
         },
     }
-}
-
-test "attemptRunWithOptions maps integrity failure by error kind" {
-    const allocator = std.testing.allocator;
-    const source = "{}";
-
-    const mapped = state_errors.classifyByState(.verify_blob, state_errors.normalizeCauseByState(.verify_blob, error.BlobHashMismatch));
-    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_BLOB_MISMATCH, mapped);
-
-    const mapped_tree = state_errors.classifyByState(.verify_tree_root, state_errors.normalizeCauseByState(.verify_tree_root, error.PathTraversalDetected));
-    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped_tree);
-    const mapped_resolve_tree = state_errors.classifyByState(.resolve_toolchain, state_errors.normalizeCauseByState(.resolve_toolchain, error.TreeRootMismatch));
-    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_TREE_MISMATCH, mapped_resolve_tree);
-
-    _ = source;
-    _ = allocator;
-}
-
-test "attemptRunWithOptions maps publish failure by error kind" {
-    const mapped = state_errors.classifyByState(.atomic_publish, state_errors.normalizeCauseByState(.atomic_publish, error.FsyncFailed));
-    try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped);
-    const hash_mapped = state_errors.classifyByState(.verify_outputs, state_errors.normalizeCauseByState(.verify_outputs, error.OutputHashMismatch));
-    try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_OUTPUT_HASH_MISMATCH, hash_mapped);
-}
-
-test "attemptRunWithOptions maps unpack traversal as integrity error" {
-    const mapped = state_errors.classifyByState(.unpack_staging, state_errors.normalizeCauseByState(.unpack_staging, error.PathTraversalDetected));
-    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped);
 }
 
 test "attemptRunFromPathWithOptions returns canonical io cause for missing input" {

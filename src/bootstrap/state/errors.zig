@@ -1,3 +1,4 @@
+const std = @import("std");
 const parse_errors = @import("../../parser/parse_errors.zig");
 const mini_tuf = @import("../../trust/mini_tuf.zig");
 const kx_error = @import("../../errors/kx_error.zig");
@@ -80,4 +81,28 @@ fn normalizeExecuteCause(err: anyerror) anyerror {
     if (io != error.Internal) return io;
 
     return err;
+}
+
+test "classify/normalize maps integrity failure by error kind" {
+    const mapped_blob = classifyByState(.verify_blob, normalizeCauseByState(.verify_blob, error.BlobHashMismatch));
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_BLOB_MISMATCH, mapped_blob);
+
+    const mapped_tree = classifyByState(.verify_tree_root, normalizeCauseByState(.verify_tree_root, error.PathTraversalDetected));
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped_tree);
+
+    const mapped_resolve = classifyByState(.resolve_toolchain, normalizeCauseByState(.resolve_toolchain, error.TreeRootMismatch));
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_TREE_MISMATCH, mapped_resolve);
+}
+
+test "classify/normalize maps publish failure by error kind" {
+    const mapped_fsync = classifyByState(.atomic_publish, normalizeCauseByState(.atomic_publish, error.FsyncFailed));
+    try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped_fsync);
+
+    const mapped_hash = classifyByState(.verify_outputs, normalizeCauseByState(.verify_outputs, error.OutputHashMismatch));
+    try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_OUTPUT_HASH_MISMATCH, mapped_hash);
+}
+
+test "classify/normalize maps unpack traversal as integrity error" {
+    const mapped = classifyByState(.unpack_staging, normalizeCauseByState(.unpack_staging, error.PathTraversalDetected));
+    try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped);
 }
