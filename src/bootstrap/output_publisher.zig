@@ -96,7 +96,15 @@ pub fn atomicPublish(
 
     try syncDirPath(release_parent);
     try syncDirPath(options.output_root);
-    try writeCurrentPointer(allocator, options.output_root, build_id, release_rel, options.knx_digest_hex);
+    try writeCurrentPointer(
+        allocator,
+        options.output_root,
+        build_id,
+        release_rel,
+        release_root,
+        output_spec,
+        options.knx_digest_hex,
+    );
 }
 
 fn outputRelativePath(path: []const u8) ![]const u8 {
@@ -147,6 +155,8 @@ fn writeCurrentPointer(
     output_root: []const u8,
     build_id: []const u8,
     release_rel: []const u8,
+    release_root: []const u8,
+    output_spec: *const validator.OutputSpec,
     knx_digest_hex: ?[]const u8,
 ) !void {
     const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
@@ -170,6 +180,30 @@ fn writeCurrentPointer(
         try writer.writeAll(",\"knx_digest\":");
         try std.json.Stringify.encodeJsonString(digest, .{}, writer);
     }
+    try writer.writeAll(",\"outputs\":[");
+    for (output_spec.entries, 0..) |entry, idx| {
+        const rel = try outputRelativePath(entry.path);
+        const output_abs = try std.fs.path.join(allocator, &.{ release_root, rel });
+        defer allocator.free(output_abs);
+
+        var file = std.fs.cwd().openFile(output_abs, .{}) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.IsDir => return error.OutputMissing,
+            else => return err,
+        };
+        defer file.close();
+        const hashed = try hashOpenFileWithSize(&file);
+        const digest_hex = std.fmt.bytesToHex(hashed.digest, .lower);
+
+        if (idx != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"path\":");
+        try std.json.Stringify.encodeJsonString(entry.path, .{}, writer);
+        try writer.writeAll(",\"sha256\":\"");
+        try writer.writeAll(digest_hex[0..]);
+        try writer.writeAll("\",\"size\":");
+        try writer.print("{d}", .{hashed.size});
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]");
     try writer.print(",\"published_at_unix_ms\":{d}", .{published_at_unix_ms});
     try writer.writeAll("}");
     try atomic_file.finish();
@@ -182,17 +216,31 @@ fn writeCurrentPointer(
 }
 
 fn hashOpenFile(file: *std.fs.File) ![32]u8 {
+    return (try hashOpenFileWithSize(file)).digest;
+}
+
+const HashWithSize = struct {
+    digest: [32]u8,
+    size: u64,
+};
+
+fn hashOpenFileWithSize(file: *std.fs.File) !HashWithSize {
     try file.seekTo(0);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     var buffer: [64 * 1024]u8 = undefined;
+    var total: u64 = 0;
     while (true) {
         const read_len = try file.read(&buffer);
         if (read_len == 0) break;
         hasher.update(buffer[0..read_len]);
+        total += read_len;
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
-    return digest;
+    return .{
+        .digest = digest,
+        .size = total,
+    };
 }
 
 test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
@@ -249,6 +297,31 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
         .string => |str| try std.testing.expectEqualStrings("releases/build-test", str),
         else => return error.TestUnexpectedResult,
     }
+    const outputs_val = root.get("outputs") orelse return error.TestUnexpectedResult;
+    const outputs = switch (outputs_val) {
+        .array => |arr| arr,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), outputs.items.len);
+    const first_output = switch (outputs.items[0]) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const out_path = switch (first_output.get("path") orelse return error.TestUnexpectedResult) {
+        .string => |str| str,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("kilnexus-out/app", out_path);
+    const out_sha = switch (first_output.get("sha256") orelse return error.TestUnexpectedResult) {
+        .string => |str| str,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 64), out_sha.len);
+    const out_size = switch (first_output.get("size") orelse return error.TestUnexpectedResult) {
+        .integer => |n| n,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(i64, 9), out_size);
 
     if (std.fs.has_executable_bit) {
         var published_file = try std.fs.cwd().openFile(published, .{});
