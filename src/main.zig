@@ -19,9 +19,11 @@ const CurrentPointerSummary = struct {
 
 const BootstrapCliArgs = struct {
     path: []const u8 = "Knxfile",
-    trust_dir: []const u8 = "trust",
+    trust_dir: ?[]const u8 = "trust",
+    trust_state_path: ?[]const u8 = ".kilnexus-trust-state.json",
     cache_root: []const u8 = ".kilnexus-cache",
     output_root: []const u8 = "kilnexus-out",
+    json_output: bool = false,
 };
 
 pub fn main() !void {
@@ -41,24 +43,23 @@ pub fn main() !void {
         return error.InvalidCommand;
     }
 
-    var positional: [5][]const u8 = undefined;
-    var positional_count: usize = 0;
+    var cli_tokens: std.ArrayList([]const u8) = .empty;
+    defer cli_tokens.deinit(allocator);
     while (args.next()) |arg| {
-        if (positional_count >= positional.len) {
-            printUsage();
-            return error.InvalidCommand;
-        }
-        positional[positional_count] = arg;
-        positional_count += 1;
+        try cli_tokens.append(allocator, arg);
     }
-    const cli = parseBootstrapCliArgs(positional[0..positional_count]) catch {
+    const cli = parseBootstrapCliArgs(cli_tokens.items) catch |err| {
+        if (err == error.HelpRequested) {
+            printUsage();
+            return;
+        }
         printUsage();
         return error.InvalidCommand;
     };
 
     var attempt = bootstrap.attemptRunFromPathWithOptions(allocator, cli.path, .{
         .trust_metadata_dir = cli.trust_dir,
-        .trust_state_path = ".kilnexus-trust-state.json",
+        .trust_state_path = if (cli.trust_dir == null) null else cli.trust_state_path,
         .cache_root = cli.cache_root,
         .output_root = cli.output_root,
     });
@@ -66,26 +67,10 @@ pub fn main() !void {
     switch (attempt) {
         .success => |*run_result| {
             defer run_result.deinit(allocator);
-            std.debug.print("Bootstrap completed with state: {s}\n", .{@tagName(run_result.final_state)});
-            std.debug.print(
-                "Trust versions root/timestamp/snapshot/targets: {d}/{d}/{d}/{d}\n",
-                .{
-                    run_result.trust.root_version,
-                    run_result.trust.timestamp_version,
-                    run_result.trust.snapshot_version,
-                    run_result.trust.targets_version,
-                },
-            );
-            std.debug.print("Verify mode: {s}\n", .{@tagName(run_result.verify_mode)});
-            std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
-            std.debug.print("Workspace cwd: {s}\n", .{run_result.workspace_cwd});
-            std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});
-            printCurrentPointerSummary(allocator, cli.output_root) catch |err| {
-                std.debug.print("Current pointer read failed: {s}\n", .{@errorName(err)});
-            };
-
-            for (run_result.trace.items) |state| {
-                std.debug.print(" - {s}\n", .{@tagName(state)});
+            if (cli.json_output) {
+                try printSuccessJson(allocator, run_result, &cli);
+            } else {
+                printSuccessHuman(allocator, run_result, &cli);
             }
         },
         .failure => |failure| {
@@ -116,30 +101,204 @@ pub fn main() !void {
 
 fn printUsage() void {
     std.debug.print(
-        "Usage: Kilnexus_core bootstrap [Knxfile] [trust-dir] [cache-root] [output-root]\n",
+        "Usage: Kilnexus_core bootstrap [Knxfile] [trust-dir] [cache-root] [output-root] [options]\n",
+        .{},
+    );
+    std.debug.print(
+        "Options: --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --json --help\n",
         .{},
     );
 }
 
 fn parseBootstrapCliArgs(args: []const []const u8) !BootstrapCliArgs {
-    if (args.len > 4) return error.InvalidCommand;
-
     var output: BootstrapCliArgs = .{};
-    if (args.len >= 1) output.path = args[0];
-    if (args.len >= 2) output.trust_dir = args[1];
-    if (args.len >= 3) output.cache_root = args[2];
-    if (args.len >= 4) output.output_root = args[3];
+    var positional_index: usize = 0;
+    var trust_set = false;
+    var cache_set = false;
+    var output_set = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--")) {
+            if (std.mem.eql(u8, arg, "--json")) {
+                output.json_output = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--trust-off")) {
+                output.trust_dir = null;
+                output.trust_state_path = null;
+                trust_set = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--trust-dir")) {
+                const value = try nextOptionValue(args, &i);
+                output.trust_dir = value;
+                if (output.trust_state_path == null) {
+                    output.trust_state_path = ".kilnexus-trust-state.json";
+                }
+                trust_set = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--trust-state")) {
+                const value = try nextOptionValue(args, &i);
+                if (std.mem.eql(u8, value, "off")) {
+                    output.trust_state_path = null;
+                } else {
+                    output.trust_state_path = value;
+                }
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--cache-root")) {
+                output.cache_root = try nextOptionValue(args, &i);
+                cache_set = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--output-root")) {
+                output.output_root = try nextOptionValue(args, &i);
+                output_set = true;
+                continue;
+            }
+            return error.InvalidCommand;
+        }
+
+        switch (positional_index) {
+            0 => output.path = arg,
+            1 => {
+                if (trust_set) return error.InvalidCommand;
+                output.trust_dir = arg;
+                trust_set = true;
+            },
+            2 => {
+                if (cache_set) return error.InvalidCommand;
+                output.cache_root = arg;
+                cache_set = true;
+            },
+            3 => {
+                if (output_set) return error.InvalidCommand;
+                output.output_root = arg;
+                output_set = true;
+            },
+            else => return error.InvalidCommand,
+        }
+        positional_index += 1;
+    }
+
     return output;
 }
 
+fn nextOptionValue(args: []const []const u8, index: *usize) ![]const u8 {
+    index.* += 1;
+    if (index.* >= args.len) return error.InvalidCommand;
+    const value = args[index.*];
+    if (std.mem.startsWith(u8, value, "--")) return error.InvalidCommand;
+    return value;
+}
+
+fn printSuccessHuman(allocator: std.mem.Allocator, run_result: *const bootstrap.RunResult, cli: *const BootstrapCliArgs) void {
+    std.debug.print("Bootstrap completed with state: {s}\n", .{@tagName(run_result.final_state)});
+    std.debug.print(
+        "Trust versions root/timestamp/snapshot/targets: {d}/{d}/{d}/{d}\n",
+        .{
+            run_result.trust.root_version,
+            run_result.trust.timestamp_version,
+            run_result.trust.snapshot_version,
+            run_result.trust.targets_version,
+        },
+    );
+    std.debug.print("Verify mode: {s}\n", .{@tagName(run_result.verify_mode)});
+    std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
+    std.debug.print("Workspace cwd: {s}\n", .{run_result.workspace_cwd});
+    std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});
+    printCurrentPointerSummary(allocator, cli.output_root) catch |err| {
+        std.debug.print("Current pointer read failed: {s}\n", .{@errorName(err)});
+    };
+
+    for (run_result.trace.items) |state| {
+        std.debug.print(" - {s}\n", .{@tagName(state)});
+    }
+}
+
+fn printSuccessJson(
+    allocator: std.mem.Allocator,
+    run_result: *const bootstrap.RunResult,
+    cli: *const BootstrapCliArgs,
+) !void {
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var output_writer = output.writer(allocator);
+    var output_buffer: [4096]u8 = undefined;
+    var output_adapter = output_writer.adaptToNewApi(&output_buffer);
+    const writer = &output_adapter.new_interface;
+
+    try writer.writeAll("{\"status\":\"ok\",\"state\":");
+    try std.json.Stringify.encodeJsonString(@tagName(run_result.final_state), .{}, writer);
+    try writer.writeAll(",\"verify_mode\":");
+    try std.json.Stringify.encodeJsonString(@tagName(run_result.verify_mode), .{}, writer);
+    try writer.writeAll(",\"knx_digest\":");
+    try std.json.Stringify.encodeJsonString(run_result.knx_digest_hex[0..], .{}, writer);
+    try writer.writeAll(",\"workspace_cwd\":");
+    try std.json.Stringify.encodeJsonString(run_result.workspace_cwd, .{}, writer);
+    try writer.writeAll(",\"canonical_json_bytes\":");
+    try writer.print("{d}", .{run_result.canonical_json.len});
+    try writer.writeAll(",\"trust\":{\"root\":");
+    try writer.print("{d}", .{run_result.trust.root_version});
+    try writer.writeAll(",\"timestamp\":");
+    try writer.print("{d}", .{run_result.trust.timestamp_version});
+    try writer.writeAll(",\"snapshot\":");
+    try writer.print("{d}", .{run_result.trust.snapshot_version});
+    try writer.writeAll(",\"targets\":");
+    try writer.print("{d}", .{run_result.trust.targets_version});
+    try writer.writeAll("}");
+
+    var pointer = readCurrentPointerSummary(allocator, cli.output_root) catch |err| {
+        try writer.writeAll(",\"published_error\":");
+        try std.json.Stringify.encodeJsonString(@errorName(err), .{}, writer);
+        try writeTraceJson(writer, run_result);
+        try writer.writeAll("}\n");
+        std.debug.print("{s}", .{output.items});
+        return;
+    };
+    defer pointer.deinit(allocator);
+
+    const release_abs = try std.fs.path.join(allocator, &.{ cli.output_root, pointer.release_rel });
+    defer allocator.free(release_abs);
+    try writer.writeAll(",\"published\":{\"build_id\":");
+    try std.json.Stringify.encodeJsonString(pointer.build_id, .{}, writer);
+    try writer.writeAll(",\"release_rel\":");
+    try std.json.Stringify.encodeJsonString(pointer.release_rel, .{}, writer);
+    try writer.writeAll(",\"release_path\":");
+    try std.json.Stringify.encodeJsonString(release_abs, .{}, writer);
+    if (pointer.verify_mode) |mode| {
+        try writer.writeAll(",\"verify_mode\":");
+        try std.json.Stringify.encodeJsonString(mode, .{}, writer);
+    }
+    if (pointer.toolchain_tree_root) |tree_root| {
+        try writer.writeAll(",\"toolchain_tree_root\":");
+        try std.json.Stringify.encodeJsonString(tree_root, .{}, writer);
+    }
+    try writer.writeAll("}");
+
+    try writeTraceJson(writer, run_result);
+    try writer.writeAll("}\n");
+    std.debug.print("{s}", .{output.items});
+}
+
+fn writeTraceJson(writer: *std.Io.Writer, run_result: *const bootstrap.RunResult) !void {
+    try writer.writeAll(",\"trace\":[");
+    for (run_result.trace.items, 0..) |state, idx| {
+        if (idx != 0) try writer.writeAll(",");
+        try std.json.Stringify.encodeJsonString(@tagName(state), .{}, writer);
+    }
+    try writer.writeAll("]");
+}
+
 fn printCurrentPointerSummary(allocator: std.mem.Allocator, output_root: []const u8) !void {
-    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
-    defer allocator.free(pointer_path);
-
-    const raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 1024 * 1024);
-    defer allocator.free(raw);
-
-    var summary = try parseCurrentPointerSummary(allocator, raw);
+    var summary = try readCurrentPointerSummary(allocator, output_root);
     defer summary.deinit(allocator);
     const release_abs = try std.fs.path.join(allocator, &.{ output_root, summary.release_rel });
     defer allocator.free(release_abs);
@@ -152,6 +311,16 @@ fn printCurrentPointerSummary(allocator: std.mem.Allocator, output_root: []const
     if (summary.toolchain_tree_root) |tree_root| {
         std.debug.print("Published toolchain tree root: {s}\n", .{tree_root});
     }
+}
+
+fn readCurrentPointerSummary(allocator: std.mem.Allocator, output_root: []const u8) !CurrentPointerSummary {
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+
+    const raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 1024 * 1024);
+    defer allocator.free(raw);
+
+    return parseCurrentPointerSummary(allocator, raw);
 }
 
 fn parseCurrentPointerSummary(allocator: std.mem.Allocator, raw: []const u8) !CurrentPointerSummary {
@@ -234,9 +403,13 @@ test "parseCurrentPointerSummary rejects missing required fields" {
 test "parseBootstrapCliArgs applies defaults and optional overrides" {
     const defaults = try parseBootstrapCliArgs(&.{});
     try std.testing.expectEqualStrings("Knxfile", defaults.path);
-    try std.testing.expectEqualStrings("trust", defaults.trust_dir);
+    try std.testing.expect(defaults.trust_dir != null);
+    try std.testing.expectEqualStrings("trust", defaults.trust_dir.?);
+    try std.testing.expect(defaults.trust_state_path != null);
+    try std.testing.expectEqualStrings(".kilnexus-trust-state.json", defaults.trust_state_path.?);
     try std.testing.expectEqualStrings(".kilnexus-cache", defaults.cache_root);
     try std.testing.expectEqualStrings("kilnexus-out", defaults.output_root);
+    try std.testing.expect(!defaults.json_output);
 
     const custom = try parseBootstrapCliArgs(&.{
         "Custom.knx",
@@ -245,7 +418,8 @@ test "parseBootstrapCliArgs applies defaults and optional overrides" {
         "out-dir",
     });
     try std.testing.expectEqualStrings("Custom.knx", custom.path);
-    try std.testing.expectEqualStrings("custom-trust", custom.trust_dir);
+    try std.testing.expect(custom.trust_dir != null);
+    try std.testing.expectEqualStrings("custom-trust", custom.trust_dir.?);
     try std.testing.expectEqualStrings("cache-dir", custom.cache_root);
     try std.testing.expectEqualStrings("out-dir", custom.output_root);
 }
@@ -255,4 +429,48 @@ test "parseBootstrapCliArgs rejects too many positional arguments" {
         error.InvalidCommand,
         parseBootstrapCliArgs(&.{ "a", "b", "c", "d", "e" }),
     );
+}
+
+test "parseBootstrapCliArgs parses named options" {
+    const parsed = try parseBootstrapCliArgs(&.{
+        "Knxfile.prod",
+        "--trust-dir",
+        "trust-prod",
+        "--trust-state",
+        "trust-state-prod.json",
+        "--cache-root",
+        ".cache-prod",
+        "--output-root",
+        "out-prod",
+        "--json",
+    });
+    try std.testing.expectEqualStrings("Knxfile.prod", parsed.path);
+    try std.testing.expect(parsed.trust_dir != null);
+    try std.testing.expectEqualStrings("trust-prod", parsed.trust_dir.?);
+    try std.testing.expect(parsed.trust_state_path != null);
+    try std.testing.expectEqualStrings("trust-state-prod.json", parsed.trust_state_path.?);
+    try std.testing.expectEqualStrings(".cache-prod", parsed.cache_root);
+    try std.testing.expectEqualStrings("out-prod", parsed.output_root);
+    try std.testing.expect(parsed.json_output);
+}
+
+test "parseBootstrapCliArgs parses trust off and disabled trust state" {
+    const parsed = try parseBootstrapCliArgs(&.{
+        "--trust-off",
+        "--trust-state",
+        "off",
+    });
+    try std.testing.expect(parsed.trust_dir == null);
+    try std.testing.expect(parsed.trust_state_path == null);
+}
+
+test "parseBootstrapCliArgs rejects conflict between trust option and trust positional" {
+    try std.testing.expectError(
+        error.InvalidCommand,
+        parseBootstrapCliArgs(&.{ "Knxfile", "--trust-off", "trust-positional" }),
+    );
+}
+
+test "parseBootstrapCliArgs returns help requested" {
+    try std.testing.expectError(error.HelpRequested, parseBootstrapCliArgs(&.{"--help"}));
 }
