@@ -11,6 +11,9 @@ pub const InstallOptions = struct {
     allow_insecure_http_source: bool = false,
 };
 
+const windows_seal_retry_attempts: u8 = 6;
+const windows_seal_retry_delay_ms: u64 = 150;
+
 pub const InstallSession = struct {
     allocator: std.mem.Allocator,
     spec: *const validator.ToolchainSpec,
@@ -198,7 +201,7 @@ pub const InstallSession = struct {
             try std.fs.cwd().makePath(parent);
         }
 
-        std.fs.cwd().rename(self.staging_path, self.tree_path) catch |err| switch (err) {
+        renameWithRetries(self.staging_path, self.tree_path) catch |err| switch (err) {
             error.PathAlreadyExists => {
                 std.fs.cwd().deleteTree(self.staging_path) catch {};
                 self.cache_hit = true;
@@ -845,43 +848,85 @@ fn makeReadOnlyRecursively(allocator: std.mem.Allocator, root_path: []const u8) 
     root.chmod(0o555) catch {};
 }
 
+fn renameWithRetries(from_path: []const u8, to_path: []const u8) !void {
+    if (builtin.os.tag != .windows) {
+        return std.fs.cwd().rename(from_path, to_path);
+    }
+
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        std.fs.cwd().rename(from_path, to_path) catch |err| {
+            if (!isRetryableWindowsSealError(err) or attempt + 1 >= windows_seal_retry_attempts) {
+                return err;
+            }
+            const backoff_ms = windows_seal_retry_delay_ms * (@as(u64, attempt) + 1);
+            std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
+            continue;
+        };
+        return;
+    }
+}
+
 fn tightenWindowsAcl(allocator: std.mem.Allocator, root_path: []const u8) !void {
     const icacls_exe = try resolveIcaclsPath(allocator);
     defer allocator.free(icacls_exe);
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{
-            icacls_exe,
-            root_path,
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:(RX)",
-            "*S-1-5-32-544:(RX)",
-            "*S-1-5-11:(RX)",
-            "/grant",
-            "*S-1-5-18:(OI)(CI)(RX)",
-            "*S-1-5-32-544:(OI)(CI)(RX)",
-            "*S-1-5-11:(OI)(CI)(RX)",
-            "/T",
-            "/C",
-            "/Q",
-        },
-        .max_output_bytes = 64 * 1024,
-    }) catch |err| switch (err) {
-        error.FileNotFound => return error.FileNotFound,
-        error.AccessDenied => return error.AccessDenied,
-        else => return error.Unexpected,
-    };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    var attempt: u8 = 0;
+    while (true) : (attempt += 1) {
+        const result = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{
+                icacls_exe,
+                root_path,
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-18:(RX)",
+                "*S-1-5-32-544:(RX)",
+                "*S-1-5-11:(RX)",
+                "/grant",
+                "*S-1-5-18:(OI)(CI)(RX)",
+                "*S-1-5-32-544:(OI)(CI)(RX)",
+                "*S-1-5-11:(OI)(CI)(RX)",
+                "/T",
+                "/C",
+                "/Q",
+            },
+            .max_output_bytes = 64 * 1024,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return error.FileNotFound,
+            error.AccessDenied, error.PermissionDenied, error.FileBusy => {
+                if (attempt + 1 >= windows_seal_retry_attempts) return error.AccessDenied;
+                const backoff_ms = windows_seal_retry_delay_ms * (@as(u64, attempt) + 1);
+                std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
+                continue;
+            },
+            else => return error.Unexpected,
+        };
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
 
-    switch (result.term) {
-        .Exited => |code| {
-            if (code != 0) return error.AccessDenied;
-        },
-        else => return error.AccessDenied,
+        switch (result.term) {
+            .Exited => |code| {
+                if (code == 0) return;
+                if (attempt + 1 >= windows_seal_retry_attempts) return error.AccessDenied;
+                const backoff_ms = windows_seal_retry_delay_ms * (@as(u64, attempt) + 1);
+                std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
+                continue;
+            },
+            else => {
+                if (attempt + 1 >= windows_seal_retry_attempts) return error.AccessDenied;
+                const backoff_ms = windows_seal_retry_delay_ms * (@as(u64, attempt) + 1);
+                std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
+                continue;
+            },
+        }
     }
+}
+
+fn isRetryableWindowsSealError(err: anyerror) bool {
+    return err == error.AccessDenied or
+        err == error.PermissionDenied or
+        err == error.FileBusy;
 }
 
 fn resolveIcaclsPath(allocator: std.mem.Allocator) ![]u8 {
