@@ -89,6 +89,7 @@ fn printUsage() void {
         "Usage: Kilnexus_core bootstrap [Knxfile] [trust-dir] [cache-root] [output-root] [options]\n",
         .{},
     );
+    std.debug.print("Knxfile path must be extensionless (no .toml).\n", .{});
     std.debug.print(
         "Options: --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --json --help\n",
         .{},
@@ -173,7 +174,17 @@ fn parseBootstrapCliArgs(args: []const []const u8) !BootstrapCliArgs {
         positional_index += 1;
     }
 
+    try validateKnxfileCliPath(output.path);
     return output;
+}
+
+fn validateKnxfileCliPath(path: []const u8) !void {
+    if (hasSuffixIgnoreCase(path, ".toml")) return error.InvalidCommand;
+}
+
+fn hasSuffixIgnoreCase(text: []const u8, suffix: []const u8) bool {
+    if (text.len < suffix.len) return false;
+    return std.ascii.eqlIgnoreCase(text[text.len - suffix.len ..], suffix);
 }
 
 fn nextOptionValue(args: []const []const u8, index: *usize) ![]const u8 {
@@ -522,6 +533,11 @@ test "parseBootstrapCliArgs rejects conflict between trust option and trust posi
 
 test "parseBootstrapCliArgs returns help requested" {
     try std.testing.expectError(error.HelpRequested, parseBootstrapCliArgs(&.{"--help"}));
+}
+
+test "parseBootstrapCliArgs rejects toml lockfile suffix" {
+    try std.testing.expectError(error.InvalidCommand, parseBootstrapCliArgs(&.{"Knxfile.toml"}));
+    try std.testing.expectError(error.InvalidCommand, parseBootstrapCliArgs(&.{"Knxfile.TOML"}));
 }
 
 test "buildFailureJsonLine renders stable failure payload" {
