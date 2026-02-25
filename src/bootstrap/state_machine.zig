@@ -4,70 +4,24 @@ const parse_errors = @import("../parser/parse_errors.zig");
 const validator = @import("../knx/validator.zig");
 const mini_tuf = @import("../trust/mini_tuf.zig");
 const kx_error = @import("../errors/kx_error.zig");
+const state_types = @import("state/types.zig");
+const state_errors = @import("state/errors.zig");
 const toolchain_installer = @import("toolchain_installer.zig");
 const workspace_projector = @import("workspace_projector.zig");
 const build_executor = @import("build_executor.zig");
 const output_publisher = @import("output_publisher.zig");
 
-pub const State = enum {
-    init,
-    load_trust_metadata,
-    verify_metadata_chain,
-    parse_knxfile,
-    resolve_toolchain,
-    download_blob,
-    verify_blob,
-    unpack_staging,
-    compute_tree_root,
-    verify_tree_root,
-    seal_cache_object,
-    execute_build_graph,
-    verify_outputs,
-    atomic_publish,
-    done,
-    failed,
-};
+pub const State = state_types.State;
+pub const RunResult = state_types.RunResult;
+pub const RunFailure = state_types.RunFailure;
+pub const RunAttempt = state_types.RunAttempt;
+pub const RunOptions = state_types.RunOptions;
 
-pub const RunResult = struct {
-    trace: std.ArrayList(State),
-    canonical_json: []u8,
-    workspace_cwd: []u8,
-    verify_mode: validator.VerifyMode,
-    knx_digest_hex: [64]u8,
-    trust: mini_tuf.VerificationSummary,
-    final_state: State,
-
-    pub fn deinit(self: *RunResult, allocator: std.mem.Allocator) void {
-        self.trace.deinit(allocator);
-        allocator.free(self.canonical_json);
-        allocator.free(self.workspace_cwd);
-        self.* = undefined;
-    }
-};
-
-pub const RunFailure = struct {
-    at: State,
-    code: kx_error.Code,
-    cause: anyerror,
-};
-
-pub const RunAttempt = union(enum) {
-    success: RunResult,
-    failure: RunFailure,
-};
-
-const max_knxfile_bytes: usize = 4 * 1024 * 1024;
+const max_knxfile_bytes: usize = state_types.max_knxfile_bytes;
 
 pub fn runFromPath(allocator: std.mem.Allocator, path: []const u8) !RunResult {
     return runFromPathWithOptions(allocator, path, .{});
 }
-
-pub const RunOptions = struct {
-    trust_metadata_dir: ?[]const u8 = "trust",
-    trust_state_path: ?[]const u8 = ".kilnexus-trust-state.json",
-    cache_root: []const u8 = ".kilnexus-cache",
-    output_root: []const u8 = "kilnexus-out",
-};
 
 pub fn runFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) !RunResult {
     const source = try std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes);
@@ -343,80 +297,11 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
 }
 
 fn classifyByState(state: State, err: anyerror) kx_error.Code {
-    return switch (state) {
-        .init => kx_error.classifyIo(err),
-        .load_trust_metadata, .verify_metadata_chain => kx_error.classifyTrust(err),
-        .parse_knxfile => kx_error.classifyParse(err),
-        .resolve_toolchain => classifyResolve(err),
-        .download_blob, .seal_cache_object => kx_error.classifyIo(err),
-        .unpack_staging => classifyUnpack(err),
-        .verify_blob => kx_error.classifyIntegrity(err),
-        .compute_tree_root, .verify_tree_root => kx_error.classifyIntegrity(err),
-        .execute_build_graph => classifyExecute(err),
-        .verify_outputs, .atomic_publish => kx_error.classifyPublish(err),
-        else => .KX_INTERNAL,
-    };
+    return state_errors.classifyByState(state, err);
 }
 
 fn normalizeCauseByState(state: State, err: anyerror) anyerror {
-    return switch (state) {
-        .init, .download_blob, .seal_cache_object => kx_error.normalizeIo(err),
-        .resolve_toolchain => normalizeResolveCause(err),
-        .unpack_staging => normalizeUnpackCause(err),
-        .load_trust_metadata, .verify_metadata_chain => mini_tuf.normalizeError(err),
-        .parse_knxfile => parse_errors.normalize(err),
-        .verify_blob, .compute_tree_root, .verify_tree_root => kx_error.normalizeIntegrity(err),
-        .execute_build_graph => normalizeExecuteCause(err),
-        .verify_outputs, .atomic_publish => kx_error.normalizePublish(err),
-        else => err,
-    };
-}
-
-fn classifyUnpack(err: anyerror) kx_error.Code {
-    const integrity_code = kx_error.classifyIntegrity(err);
-    if (integrity_code != .KX_INTERNAL) return integrity_code;
-    return kx_error.classifyIo(err);
-}
-
-fn normalizeUnpackCause(err: anyerror) anyerror {
-    const integrity = kx_error.normalizeIntegrity(err);
-    if (integrity != error.Internal) return integrity;
-    return kx_error.normalizeIo(err);
-}
-
-fn classifyResolve(err: anyerror) kx_error.Code {
-    const integrity_code = kx_error.classifyIntegrity(err);
-    if (integrity_code != .KX_INTERNAL) return integrity_code;
-    return kx_error.classifyIo(err);
-}
-
-fn normalizeResolveCause(err: anyerror) anyerror {
-    const integrity = kx_error.normalizeIntegrity(err);
-    if (integrity != error.Internal) return integrity;
-    return kx_error.normalizeIo(err);
-}
-
-fn classifyExecute(err: anyerror) kx_error.Code {
-    const build_code = kx_error.classifyBuild(err);
-    if (build_code != .KX_INTERNAL) return build_code;
-
-    const integrity_code = kx_error.classifyIntegrity(err);
-    if (integrity_code != .KX_INTERNAL) return integrity_code;
-
-    return kx_error.classifyIo(err);
-}
-
-fn normalizeExecuteCause(err: anyerror) anyerror {
-    const build = kx_error.normalizeBuild(err);
-    if (build != error.Internal) return build;
-
-    const integrity = kx_error.normalizeIntegrity(err);
-    if (integrity != error.Internal) return integrity;
-
-    const io = kx_error.normalizeIo(err);
-    if (io != error.Internal) return io;
-
-    return err;
+    return state_errors.normalizeCauseByState(state, err);
 }
 
 fn push(trace: *std.ArrayList(State), allocator: std.mem.Allocator, state: State) !void {
