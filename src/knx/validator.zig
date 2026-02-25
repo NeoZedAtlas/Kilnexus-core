@@ -67,6 +67,33 @@ const operator_archive_pack_keys = [_][]const u8{
     "format",
 };
 
+const operator_map_fs_copy_keys = [_][]const u8{
+    "run",
+    "inputs",
+    "outputs",
+};
+
+const operator_map_c_compile_keys = [_][]const u8{
+    "run",
+    "inputs",
+    "outputs",
+    "flags",
+};
+
+const operator_map_zig_link_keys = [_][]const u8{
+    "run",
+    "inputs",
+    "outputs",
+    "flags",
+};
+
+const operator_map_archive_pack_keys = [_][]const u8{
+    "run",
+    "inputs",
+    "outputs",
+    "format",
+};
+
 pub const VerifyMode = enum {
     strict,
     fast,
@@ -335,24 +362,30 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
     }
 
     const operators_value = root.get("operators") orelse return error.MissingRequiredField;
-    const operators = try expectArray(operators_value, "operators");
-    for (operators.items) |op_value| {
-        const op_obj = try expectObject(op_value, "operator");
-        const op_id = try expectNonEmptyString(op_obj, "id");
-        try validateOperatorId(op_id);
-        const op = try expectNonEmptyString(op_obj, "run");
-        if (!isAllowedOperator(op)) return error.OperatorNotAllowed;
-        if (std.mem.eql(u8, op, "knx.fs.copy")) {
-            try ensureOnlyKeys(op_obj, operator_fs_copy_keys[0..]);
-        } else if (std.mem.eql(u8, op, "knx.c.compile")) {
-            try ensureOnlyKeys(op_obj, operator_c_compile_keys[0..]);
-        } else if (std.mem.eql(u8, op, "knx.zig.link")) {
-            try ensureOnlyKeys(op_obj, operator_zig_link_keys[0..]);
-        } else if (std.mem.eql(u8, op, "knx.archive.pack")) {
-            try ensureOnlyKeys(op_obj, operator_archive_pack_keys[0..]);
-        } else {
-            return error.OperatorNotAllowed;
-        }
+    switch (operators_value) {
+        .array => |operators| {
+            for (operators.items) |op_value| {
+                const op_obj = try expectObject(op_value, "operator");
+                const op_id = try expectNonEmptyString(op_obj, "id");
+                try validateOperatorId(op_id);
+                const op = try expectNonEmptyString(op_obj, "run");
+                if (!isAllowedOperator(op)) return error.OperatorNotAllowed;
+                try ensureOperatorKeys(op_obj, op, true);
+            }
+        },
+        .object => |operators_map| {
+            var it = operators_map.iterator();
+            while (it.next()) |entry| {
+                const op_id = entry.key_ptr.*;
+                try validateOperatorId(op_id);
+                const op_obj = try expectObject(entry.value_ptr.*, "operator");
+                if (op_obj.get("id") != null) return error.ValueInvalid;
+                const op = try expectNonEmptyString(op_obj, "run");
+                if (!isAllowedOperator(op)) return error.OperatorNotAllowed;
+                try ensureOperatorKeys(op_obj, op, false);
+            }
+        },
+        else => return error.ExpectedArray,
     }
 
     return .{ .verify_mode = verify_mode };
@@ -534,8 +567,11 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
     const root = try expectObject(parsed.value, "root");
     if (root.get("build") != null) return error.LegacyBuildBlock;
     const operators_value = root.get("operators") orelse return error.MissingRequiredField;
-    const operators = try expectArray(operators_value, "operators");
-    return parseOperatorsBuildSpec(allocator, operators);
+    return switch (operators_value) {
+        .array => |operators| parseOperatorsBuildSpec(allocator, operators),
+        .object => |operators_map| parseOperatorsObjectBuildSpec(allocator, operators_map),
+        else => error.ExpectedArray,
+    };
 }
 
 const OperatorDecl = struct {
@@ -568,75 +604,143 @@ fn parseOperatorsBuildSpec(allocator: std.mem.Allocator, operators: std.json.Arr
     for (operators.items) |item| {
         const obj = try expectObject(item, "operator");
         const id_text = try expectNonEmptyString(obj, "id");
-        try validateOperatorId(id_text);
         const id_slot = try seen_ids.getOrPut(id_text);
         if (id_slot.found_existing) return error.InvalidBuildGraph;
         id_slot.value_ptr.* = {};
-        const run_text = try expectNonEmptyString(obj, "run");
-        if (!isAllowedOperator(run_text)) return error.OperatorNotAllowed;
-        if (std.mem.eql(u8, run_text, "knx.fs.copy")) {
-            try ensureOnlyKeys(obj, operator_fs_copy_keys[0..]);
-        } else if (std.mem.eql(u8, run_text, "knx.c.compile")) {
-            try ensureOnlyKeys(obj, operator_c_compile_keys[0..]);
-        } else if (std.mem.eql(u8, run_text, "knx.zig.link")) {
-            try ensureOnlyKeys(obj, operator_zig_link_keys[0..]);
-        } else if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
-            try ensureOnlyKeys(obj, operator_archive_pack_keys[0..]);
-        } else {
-            return error.OperatorNotAllowed;
-        }
-
-        const inputs = try parseStringArrayField(allocator, obj, "inputs");
-        errdefer freeOwnedStrings(allocator, inputs);
-        const outputs = try parseStringArrayField(allocator, obj, "outputs");
-        errdefer freeOwnedStrings(allocator, outputs);
-        const flags = if (obj.get("flags")) |_| try parseStringArrayField(allocator, obj, "flags") else try allocator.alloc([]u8, 0);
-        errdefer freeOwnedStrings(allocator, flags);
-
-        for (inputs) |path| try validateWorkspaceRelativePath(path);
-        for (outputs) |path| try validateWorkspaceRelativePath(path);
-
-        var archive_format: ArchiveFormat = .tar;
-        if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
-            if (obj.get("format")) |format_value| {
-                const format_text = try expectString(format_value, "archive format");
-                archive_format = parseArchiveFormat(format_text) orelse return error.ValueInvalid;
-            }
-        }
-
-        if (std.mem.eql(u8, run_text, "knx.fs.copy")) {
-            if (inputs.len != 1 or outputs.len != 1) return error.InvalidBuildGraph;
-            if (flags.len != 0) return error.ValueInvalid;
-        } else if (std.mem.eql(u8, run_text, "knx.c.compile")) {
-            if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
-            for (flags) |flag| {
-                if (!isAllowedCompileArg(flag)) return error.ValueInvalid;
-            }
-        } else if (std.mem.eql(u8, run_text, "knx.zig.link")) {
-            if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
-            for (flags) |flag| {
-                if (!isAllowedLinkArg(flag)) return error.ValueInvalid;
-            }
-        } else if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
-            if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
-            if (flags.len != 0) return error.ValueInvalid;
-        } else {
-            return error.OperatorNotAllowed;
-        }
-
-        try decls.append(allocator, .{
-            .id = try allocator.dupe(u8, id_text),
-            .run = try allocator.dupe(u8, run_text),
-            .inputs = inputs,
-            .outputs = outputs,
-            .flags = flags,
-            .archive_format = archive_format,
-        });
+        var decl = try parseOperatorDecl(allocator, id_text, obj, true);
+        errdefer decl.deinit(allocator);
+        try decls.append(allocator, decl);
     }
 
+    return buildSpecFromDecls(allocator, decls.items);
+}
+
+fn parseOperatorsObjectBuildSpec(allocator: std.mem.Allocator, operators_map: std.json.ObjectMap) !BuildSpec {
+    var decls: std.ArrayList(OperatorDecl) = .empty;
+    defer {
+        for (decls.items) |*decl| decl.deinit(allocator);
+        decls.deinit(allocator);
+    }
+
+    var ids: std.ArrayList([]const u8) = .empty;
+    defer ids.deinit(allocator);
+    var it = operators_map.iterator();
+    while (it.next()) |entry| {
+        try ids.append(allocator, entry.key_ptr.*);
+    }
+    std.mem.sort([]const u8, ids.items, {}, lessThanString);
+
+    for (ids.items) |id_text| {
+        const op_value = operators_map.get(id_text) orelse unreachable;
+        const obj = try expectObject(op_value, "operator");
+        if (obj.get("id") != null) return error.ValueInvalid;
+        var decl = try parseOperatorDecl(allocator, id_text, obj, false);
+        errdefer decl.deinit(allocator);
+        try decls.append(allocator, decl);
+    }
+
+    return buildSpecFromDecls(allocator, decls.items);
+}
+
+fn parseOperatorDecl(
+    allocator: std.mem.Allocator,
+    id_text: []const u8,
+    obj: std.json.ObjectMap,
+    expect_id_field: bool,
+) !OperatorDecl {
+    try validateOperatorId(id_text);
+    const run_text = try expectNonEmptyString(obj, "run");
+    if (!isAllowedOperator(run_text)) return error.OperatorNotAllowed;
+    try ensureOperatorKeys(obj, run_text, expect_id_field);
+
+    const inputs = try parseStringArrayField(allocator, obj, "inputs");
+    errdefer freeOwnedStrings(allocator, inputs);
+    const outputs = try parseStringArrayField(allocator, obj, "outputs");
+    errdefer freeOwnedStrings(allocator, outputs);
+    const flags = if (obj.get("flags")) |_| try parseStringArrayField(allocator, obj, "flags") else try allocator.alloc([]u8, 0);
+    errdefer freeOwnedStrings(allocator, flags);
+
+    for (inputs) |path| try validateWorkspaceRelativePath(path);
+    for (outputs) |path| try validateWorkspaceRelativePath(path);
+
+    var archive_format: ArchiveFormat = .tar;
+    if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
+        if (obj.get("format")) |format_value| {
+            const format_text = try expectString(format_value, "archive format");
+            archive_format = parseArchiveFormat(format_text) orelse return error.ValueInvalid;
+        }
+    }
+
+    if (std.mem.eql(u8, run_text, "knx.fs.copy")) {
+        if (inputs.len != 1 or outputs.len != 1) return error.InvalidBuildGraph;
+        if (flags.len != 0) return error.ValueInvalid;
+    } else if (std.mem.eql(u8, run_text, "knx.c.compile")) {
+        if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
+        for (flags) |flag| {
+            if (!isAllowedCompileArg(flag)) return error.ValueInvalid;
+        }
+    } else if (std.mem.eql(u8, run_text, "knx.zig.link")) {
+        if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
+        for (flags) |flag| {
+            if (!isAllowedLinkArg(flag)) return error.ValueInvalid;
+        }
+    } else if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
+        if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
+        if (flags.len != 0) return error.ValueInvalid;
+    } else {
+        return error.OperatorNotAllowed;
+    }
+
+    return .{
+        .id = try allocator.dupe(u8, id_text),
+        .run = try allocator.dupe(u8, run_text),
+        .inputs = inputs,
+        .outputs = outputs,
+        .flags = flags,
+        .archive_format = archive_format,
+    };
+}
+
+fn ensureOperatorKeys(op_obj: std.json.ObjectMap, run_text: []const u8, expect_id_field: bool) !void {
+    if (std.mem.eql(u8, run_text, "knx.fs.copy")) {
+        if (expect_id_field) {
+            try ensureOnlyKeys(op_obj, operator_fs_copy_keys[0..]);
+        } else {
+            try ensureOnlyKeys(op_obj, operator_map_fs_copy_keys[0..]);
+        }
+        return;
+    }
+    if (std.mem.eql(u8, run_text, "knx.c.compile")) {
+        if (expect_id_field) {
+            try ensureOnlyKeys(op_obj, operator_c_compile_keys[0..]);
+        } else {
+            try ensureOnlyKeys(op_obj, operator_map_c_compile_keys[0..]);
+        }
+        return;
+    }
+    if (std.mem.eql(u8, run_text, "knx.zig.link")) {
+        if (expect_id_field) {
+            try ensureOnlyKeys(op_obj, operator_zig_link_keys[0..]);
+        } else {
+            try ensureOnlyKeys(op_obj, operator_map_zig_link_keys[0..]);
+        }
+        return;
+    }
+    if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
+        if (expect_id_field) {
+            try ensureOnlyKeys(op_obj, operator_archive_pack_keys[0..]);
+        } else {
+            try ensureOnlyKeys(op_obj, operator_map_archive_pack_keys[0..]);
+        }
+        return;
+    }
+    return error.OperatorNotAllowed;
+}
+
+fn buildSpecFromDecls(allocator: std.mem.Allocator, decls: []const OperatorDecl) !BuildSpec {
     var output_producers: std.StringHashMap(usize) = .init(allocator);
     defer output_producers.deinit();
-    for (decls.items, 0..) |decl, idx| {
+    for (decls, 0..) |decl, idx| {
         for (decl.outputs) |output_path| {
             const gop = try output_producers.getOrPut(output_path);
             if (gop.found_existing) return error.InvalidBuildGraph;
@@ -644,7 +748,7 @@ fn parseOperatorsBuildSpec(allocator: std.mem.Allocator, operators: std.json.Arr
         }
     }
 
-    const count = decls.items.len;
+    const count = decls.len;
     var adjacency = try allocator.alloc(std.ArrayList(usize), count);
     defer {
         for (adjacency) |*edges| edges.deinit(allocator);
@@ -656,7 +760,7 @@ fn parseOperatorsBuildSpec(allocator: std.mem.Allocator, operators: std.json.Arr
     defer allocator.free(indegree);
     @memset(indegree, 0);
 
-    for (decls.items, 0..) |decl, idx| {
+    for (decls, 0..) |decl, idx| {
         for (decl.inputs) |input_path| {
             const producer = output_producers.get(input_path) orelse continue;
             if (producer == idx) return error.InvalidBuildGraph;
@@ -695,7 +799,7 @@ fn parseOperatorsBuildSpec(allocator: std.mem.Allocator, operators: std.json.Arr
     }
 
     for (ordered.items) |idx| {
-        const decl = decls.items[idx];
+        const decl = decls[idx];
         if (std.mem.eql(u8, decl.run, "knx.fs.copy")) {
             try ops.append(allocator, .{
                 .fs_copy = .{
@@ -741,6 +845,10 @@ fn parseOperatorsBuildSpec(allocator: std.mem.Allocator, operators: std.json.Arr
     return .{
         .ops = try ops.toOwnedSlice(allocator),
     };
+}
+
+fn lessThanString(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 pub fn parseBuildSpecStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!BuildSpec {
@@ -1763,6 +1871,103 @@ test "parseBuildSpec parses c.compile and zig.link operations" {
     }
 }
 
+test "parseBuildSpec parses operators object map style" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "operators": {
+        \\    "copy-final": {
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["obj/main.o"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    },
+        \\    "copy-obj": {
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["obj/main.o"]
+        \\    }
+        \\  },
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseBuildSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), spec.ops.len);
+    switch (spec.ops[0]) {
+        .fs_copy => |copy| {
+            try std.testing.expectEqualStrings("src/main.c", copy.from_path);
+            try std.testing.expectEqualStrings("obj/main.o", copy.to_path);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (spec.ops[1]) {
+        .fs_copy => |copy| {
+            try std.testing.expectEqualStrings("obj/main.o", copy.from_path);
+            try std.testing.expectEqualStrings("kilnexus-out/app", copy.to_path);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parseBuildSpec rejects id field inside operators object map style" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "operators": {
+        \\    "copy-main": {
+        \\      "id": "copy-main",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }
+        \\  },
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.ValueInvalid, parseBuildSpec(allocator, json));
+}
+
 test "parseBuildSpec rejects disallowed compile arg" {
     const allocator = std.testing.allocator;
     const json =
@@ -2174,6 +2379,43 @@ test "validateCanonicalJson prioritizes legacy build block over other schema err
     ;
 
     try std.testing.expectError(error.LegacyBuildBlock, validateCanonicalJson(allocator, json));
+}
+
+test "validateCanonicalJson accepts operators object map style" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "operators": {
+        \\    "copy-main": {
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }
+        \\  },
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    _ = try validateCanonicalJson(allocator, json);
 }
 
 test "validateCanonicalJson rejects missing operators block" {
