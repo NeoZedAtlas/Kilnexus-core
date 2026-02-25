@@ -8,6 +8,65 @@ const allowed_operators = [_][]const u8{
     "knx.archive.pack",
 };
 
+const output_entry_keys = [_][]const u8{
+    "source",
+    "publish_as",
+    "mode",
+    "sha256",
+};
+
+const local_input_keys = [_][]const u8{
+    "id",
+    "include",
+    "exclude",
+};
+
+const remote_input_keys = [_][]const u8{
+    "id",
+    "url",
+    "blob_sha256",
+    "tree_root",
+    "extract",
+};
+
+const workspace_mount_keys = [_][]const u8{
+    "source",
+    "target",
+    "mode",
+    "strip_prefix",
+};
+
+const operator_fs_copy_keys = [_][]const u8{
+    "id",
+    "run",
+    "inputs",
+    "outputs",
+};
+
+const operator_c_compile_keys = [_][]const u8{
+    "id",
+    "run",
+    "inputs",
+    "outputs",
+    "flags",
+};
+
+const operator_zig_link_keys = [_][]const u8{
+    "id",
+    "run",
+    "inputs",
+    "outputs",
+    "flags",
+};
+
+const operator_archive_pack_keys = [_][]const u8{
+    "id",
+    "run",
+    "inputs",
+    "outputs",
+    "format",
+};
+
 pub const VerifyMode = enum {
     strict,
     fast,
@@ -262,15 +321,11 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
     if (outputs.items.len == 0) return error.OutputsEmpty;
     for (outputs.items) |entry| {
         const output = try expectObject(entry, "output");
-        if (output.get("source") != null or output.get("publish_as") != null) {
-            const source = try expectNonEmptyString(output, "source");
-            try validateWorkspaceRelativePath(source);
-            const publish_as = try expectNonEmptyString(output, "publish_as");
-            try validatePublishName(publish_as);
-        } else {
-            const path = try expectNonEmptyString(output, "path");
-            try validateOutputPath(path);
-        }
+        try ensureOnlyKeys(output, output_entry_keys[0..]);
+        const source = try expectNonEmptyString(output, "source");
+        try validateWorkspaceRelativePath(source);
+        const publish_as = try expectNonEmptyString(output, "publish_as");
+        try validatePublishName(publish_as);
         const mode = try expectNonEmptyString(output, "mode");
         try expectModeString(mode);
         if (output.get("sha256")) |_| {
@@ -281,12 +336,22 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
     if (root.get("operators")) |operators_value| {
         const operators = try expectArray(operators_value, "operators");
         for (operators.items) |op_value| {
-            const op = switch (op_value) {
-                .string => |name| name,
-                .object => |obj| try expectNonEmptyString(obj, "run"),
-                else => return error.ExpectedString,
-            };
+            const op_obj = try expectObject(op_value, "operator");
+            const op_id = try expectNonEmptyString(op_obj, "id");
+            try validateOperatorId(op_id);
+            const op = try expectNonEmptyString(op_obj, "run");
             if (!isAllowedOperator(op)) return error.OperatorNotAllowed;
+            if (std.mem.eql(u8, op, "knx.fs.copy")) {
+                try ensureOnlyKeys(op_obj, operator_fs_copy_keys[0..]);
+            } else if (std.mem.eql(u8, op, "knx.c.compile")) {
+                try ensureOnlyKeys(op_obj, operator_c_compile_keys[0..]);
+            } else if (std.mem.eql(u8, op, "knx.zig.link")) {
+                try ensureOnlyKeys(op_obj, operator_zig_link_keys[0..]);
+            } else if (std.mem.eql(u8, op, "knx.archive.pack")) {
+                try ensureOnlyKeys(op_obj, operator_archive_pack_keys[0..]);
+            } else {
+                return error.OperatorNotAllowed;
+            }
         }
     }
 
@@ -421,6 +486,7 @@ pub fn parseOutputSpec(allocator: std.mem.Allocator, canonical_json: []const u8)
 
     for (outputs.items) |item| {
         const obj = try expectObject(item, "output");
+        try ensureOnlyKeys(obj, output_entry_keys[0..]);
         const mode_text = try expectNonEmptyString(obj, "mode");
         const mode = try parseOutputMode(mode_text);
         const sha256 = if (obj.get("sha256")) |sha_value| blk: {
@@ -435,22 +501,13 @@ pub fn parseOutputSpec(allocator: std.mem.Allocator, canonical_json: []const u8)
             if (source_path) |value| allocator.free(value);
             if (publish_as) |value| allocator.free(value);
         }
-        if (obj.get("source") != null or obj.get("publish_as") != null) {
-            const source_text = try expectNonEmptyString(obj, "source");
-            const publish_text = try expectNonEmptyString(obj, "publish_as");
-            try validateWorkspaceRelativePath(source_text);
-            try validatePublishName(publish_text);
-            path = try allocator.dupe(u8, source_text);
-            source_path = try allocator.dupe(u8, source_text);
-            publish_as = try allocator.dupe(u8, publish_text);
-        } else {
-            const path_text = try expectNonEmptyString(obj, "path");
-            try validateOutputPath(path_text);
-            path = try allocator.dupe(u8, path_text);
-            const rel = try outputRelativePath(path_text);
-            source_path = try allocator.dupe(u8, path_text);
-            publish_as = try allocator.dupe(u8, rel);
-        }
+        const source_text = try expectNonEmptyString(obj, "source");
+        const publish_text = try expectNonEmptyString(obj, "publish_as");
+        try validateWorkspaceRelativePath(source_text);
+        try validatePublishName(publish_text);
+        path = try allocator.dupe(u8, source_text);
+        source_path = try allocator.dupe(u8, source_text);
+        publish_as = try allocator.dupe(u8, publish_text);
 
         try entries.append(allocator, .{
             .path = path.?,
@@ -475,6 +532,9 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
     defer parsed.deinit();
 
     const root = try expectObject(parsed.value, "root");
+    if (root.get("operators") != null and root.get("build") != null) {
+        return error.ValueInvalid;
+    }
     if (root.get("operators")) |operators_value| {
         const operators = try expectArray(operators_value, "operators");
         return parseOperatorsBuildSpec(allocator, operators);
@@ -647,12 +707,29 @@ fn parseOperatorsBuildSpec(allocator: std.mem.Allocator, operators: std.json.Arr
         for (decls.items) |*decl| decl.deinit(allocator);
         decls.deinit(allocator);
     }
+    var seen_ids: std.StringHashMap(void) = .init(allocator);
+    defer seen_ids.deinit();
 
     for (operators.items) |item| {
         const obj = try expectObject(item, "operator");
         const id_text = try expectNonEmptyString(obj, "id");
+        try validateOperatorId(id_text);
+        const id_slot = try seen_ids.getOrPut(id_text);
+        if (id_slot.found_existing) return error.InvalidBuildGraph;
+        id_slot.value_ptr.* = {};
         const run_text = try expectNonEmptyString(obj, "run");
         if (!isAllowedOperator(run_text)) return error.OperatorNotAllowed;
+        if (std.mem.eql(u8, run_text, "knx.fs.copy")) {
+            try ensureOnlyKeys(obj, operator_fs_copy_keys[0..]);
+        } else if (std.mem.eql(u8, run_text, "knx.c.compile")) {
+            try ensureOnlyKeys(obj, operator_c_compile_keys[0..]);
+        } else if (std.mem.eql(u8, run_text, "knx.zig.link")) {
+            try ensureOnlyKeys(obj, operator_zig_link_keys[0..]);
+        } else if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
+            try ensureOnlyKeys(obj, operator_archive_pack_keys[0..]);
+        } else {
+            return error.OperatorNotAllowed;
+        }
 
         const inputs = try parseStringArrayField(allocator, obj, "inputs");
         errdefer freeOwnedStrings(allocator, inputs);
@@ -896,6 +973,7 @@ fn parseLocalInputs(
 ) !void {
     for (items.items) |item| {
         const obj = try expectObject(item, "local input");
+        try ensureOnlyKeys(obj, local_input_keys[0..]);
         const id_text = try expectNonEmptyString(obj, "id");
         const include_array = try expectArrayField(obj, "include");
 
@@ -943,6 +1021,7 @@ fn parseRemoteInputs(
 ) !void {
     for (items.items) |item| {
         const obj = try expectObject(item, "remote input");
+        try ensureOnlyKeys(obj, remote_input_keys[0..]);
         const id_text = try expectNonEmptyString(obj, "id");
         const url_text = try expectNonEmptyString(obj, "url");
         const blob_text = try expectNonEmptyString(obj, "blob_sha256");
@@ -976,6 +1055,7 @@ fn parseWorkspaceMounts(
 ) !void {
     for (items.items) |item| {
         const obj = try expectObject(item, "workspace mount");
+        try ensureOnlyKeys(obj, workspace_mount_keys[0..]);
         const source_text = try expectNonEmptyString(obj, "source");
         const target_text = try expectNonEmptyString(obj, "target");
         const mode_text = try expectNonEmptyString(obj, "mode");
@@ -1251,6 +1331,29 @@ fn isAllowedOperator(name: []const u8) bool {
     return false;
 }
 
+fn validateOperatorId(id: []const u8) !void {
+    if (id.len == 0) return error.ValueInvalid;
+    for (id) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch != '.') {
+            return error.ValueInvalid;
+        }
+    }
+}
+
+fn ensureOnlyKeys(object: std.json.ObjectMap, allowed_keys: []const []const u8) !void {
+    var it = object.iterator();
+    while (it.next()) |entry| {
+        if (!containsAllowedKey(entry.key_ptr.*, allowed_keys)) return error.ValueInvalid;
+    }
+}
+
+fn containsAllowedKey(key: []const u8, allowed_keys: []const []const u8) bool {
+    for (allowed_keys) |allowed| {
+        if (std.mem.eql(u8, key, allowed)) return true;
+    }
+    return false;
+}
+
 fn expectObjectField(object: std.json.ObjectMap, key: []const u8) !std.json.ObjectMap {
     const value = object.get(key) orelse return error.MissingRequiredField;
     return expectObject(value, key);
@@ -1336,11 +1439,23 @@ test "validateCanonicalJson accepts minimal valid knxfile" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ],
         \\  "operators": [
-        \\    "knx.c.compile",
-        \\    "knx.zig.link"
+        \\    {
+        \\      "id": "compile-main",
+        \\      "run": "knx.c.compile",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["obj/main.o"],
+        \\      "flags": ["-O2"]
+        \\    },
+        \\    {
+        \\      "id": "link-final",
+        \\      "run": "knx.zig.link",
+        \\      "inputs": ["obj/main.o"],
+        \\      "outputs": ["kilnexus-out/app"],
+        \\      "flags": ["-s"]
+        \\    }
         \\  ]
         \\}
     ;
@@ -1372,10 +1487,15 @@ test "validateCanonicalJson rejects custom operator" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ],
         \\  "operators": [
-        \\    "sh -c x"
+        \\    {
+        \\      "id": "evil",
+        \\      "run": "sh -c x",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["obj/main.o"]
+        \\    }
         \\  ]
         \\}
     ;
@@ -1410,7 +1530,7 @@ test "validateCanonicalJsonStrict normalizes policy errors" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1441,7 +1561,7 @@ test "parseToolchainSpec extracts source and hashes" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1487,7 +1607,7 @@ test "parseWorkspaceSpec parses inputs and deps entries" {
         \\    }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1541,7 +1661,7 @@ test "parseWorkspaceSpec requires remote tree_root when extract is true" {
         \\    ]
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1581,7 +1701,7 @@ test "parseWorkspaceSpec parses workspace mount strip_prefix" {
         \\    ]
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1617,7 +1737,7 @@ test "parseOutputSpec parses output entries" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1654,7 +1774,8 @@ test "parseOutputSpec parses output sha256 when declared" {
         \\  },
         \\  "outputs": [
         \\    {
-        \\      "path": "kilnexus-out/app",
+        \\      "source": "kilnexus-out/app",
+        \\      "publish_as": "app",
         \\      "mode": "0755",
         \\      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         \\    }
@@ -1695,7 +1816,7 @@ test "parseBuildSpec parses fs.copy operation" {
         \\    { "op": "knx.fs.copy", "from": "src/main.c", "to": "kilnexus-out/app" }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1749,7 +1870,7 @@ test "parseBuildSpec parses c.compile and zig.link operations" {
         \\    }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1810,7 +1931,7 @@ test "parseBuildSpec rejects disallowed compile arg" {
         \\    }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1847,7 +1968,7 @@ test "parseBuildSpec parses archive.pack operation" {
         \\    }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/objects.tar", "mode": "0644" }
+        \\    { "source": "kilnexus-out/objects.tar", "publish_as": "objects.tar", "mode": "0644" }
         \\  ]
         \\}
     ;
@@ -1898,7 +2019,7 @@ test "parseBuildSpec parses archive.pack tar.gz format" {
         \\    }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/objects.tar.gz", "mode": "0644" }
+        \\    { "source": "kilnexus-out/objects.tar.gz", "publish_as": "objects.tar.gz", "mode": "0644" }
         \\  ]
         \\}
     ;
@@ -1964,4 +2085,162 @@ test "validateBuildWriteIsolation allows write outside mounted input paths" {
     defer build_spec.deinit(allocator);
 
     try validateBuildWriteIsolation(&workspace_spec, &build_spec);
+}
+
+test "parseOutputSpec rejects legacy path output field" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.ValueInvalid, parseOutputSpec(allocator, json));
+}
+
+test "parseBuildSpec rejects simultaneous operators and build blocks" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "operators": [
+        \\    {
+        \\      "id": "compile-main",
+        \\      "run": "knx.c.compile",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["obj/main.o"],
+        \\      "flags": ["-O2"]
+        \\    }
+        \\  ],
+        \\  "build": [
+        \\    { "op": "knx.fs.copy", "from": "src/main.c", "to": "obj/main.c" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.ValueInvalid, parseBuildSpec(allocator, json));
+}
+
+test "parseBuildSpec rejects duplicate operator ids" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "operators": [
+        \\    {
+        \\      "id": "dup-id",
+        \\      "run": "knx.c.compile",
+        \\      "inputs": ["src/a.c"],
+        \\      "outputs": ["obj/a.o"],
+        \\      "flags": ["-O2"]
+        \\    },
+        \\    {
+        \\      "id": "dup-id",
+        \\      "run": "knx.zig.link",
+        \\      "inputs": ["obj/a.o"],
+        \\      "outputs": ["kilnexus-out/app"],
+        \\      "flags": ["-s"]
+        \\    }
+        \\  ],
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.InvalidBuildGraph, parseBuildSpec(allocator, json));
+}
+
+test "parseWorkspaceSpec rejects unknown workspace mount key" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "workspace": {
+        \\    "mounts": [
+        \\      {
+        \\        "source": "local-src",
+        \\        "target": "src",
+        \\        "mode": "0444",
+        \\        "readonly": true
+        \\      }
+        \\    ]
+        \\  },
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.ValueInvalid, parseWorkspaceSpec(allocator, json));
 }

@@ -468,7 +468,7 @@ test "run completes bootstrap happy path" {
         \\    {{ "op": "knx.fs.copy", "from": "src/app", "to": "kilnexus-out/app" }}
         \\  ],
         \\  "outputs": [
-        \\    {{ "path": "kilnexus-out/app", "mode": "0755" }}
+        \\    {{ "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }}
         \\  ]
         \\}}
     ,
@@ -799,7 +799,7 @@ test "run fails on policy violation" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -857,7 +857,7 @@ test "attemptRunWithOptions rejects build writes into mounted input path" {
         \\    { "op": "knx.fs.copy", "from": "src/main.c", "to": "src/main.c" }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -953,7 +953,7 @@ test "attemptRunWithOptions fails at download when source file is missing" {
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1002,7 +1002,7 @@ test "attemptRunWithOptions fails in execute stage when declared source is missi
         \\    { "path": "src/main.c", "source": "__missing_source__.c" }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1051,7 +1051,7 @@ test "attemptRunWithOptions maps missing toolchain for c.compile to build failur
         \\    { "op": "knx.c.compile", "src": "src/main.c", "out": "obj/main.o" }
         \\  ],
         \\  "outputs": [
-        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
         \\}
     ;
@@ -1121,7 +1121,8 @@ test "attemptRunWithOptions fails at verify_outputs on declared output sha misma
         \\  ],
         \\  "outputs": [
         \\    {{
-        \\      "path": "kilnexus-out/app",
+        \\      "source": "kilnexus-out/app",
+        \\      "publish_as": "app",
         \\      "mode": "0755",
         \\      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         \\    }}
@@ -1209,7 +1210,7 @@ test "run publishes archive.pack output from workspace inputs" {
         \\    }}
         \\  ],
         \\  "outputs": [
-        \\    {{ "path": "kilnexus-out/objects.tar", "mode": "0644" }}
+        \\    {{ "source": "kilnexus-out/objects.tar", "publish_as": "objects.tar", "mode": "0644" }}
         \\  ]
         \\}}
     ,
@@ -1321,7 +1322,7 @@ test "run publishes archive.pack tar.gz output from workspace inputs" {
         \\    }}
         \\  ],
         \\  "outputs": [
-        \\    {{ "path": "kilnexus-out/objects.tar.gz", "mode": "0644" }}
+        \\    {{ "source": "kilnexus-out/objects.tar.gz", "publish_as": "objects.tar.gz", "mode": "0644" }}
         \\  ]
         \\}}
     ,
