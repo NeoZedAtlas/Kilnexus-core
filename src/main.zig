@@ -17,6 +17,13 @@ const CurrentPointerSummary = struct {
     }
 };
 
+const BootstrapCliArgs = struct {
+    path: []const u8 = "Knxfile",
+    trust_dir: []const u8 = "trust",
+    cache_root: []const u8 = ".kilnexus-cache",
+    output_root: []const u8 = "kilnexus-out",
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -30,16 +37,30 @@ pub fn main() !void {
 
     if (!std.mem.eql(u8, command, "bootstrap")) {
         std.debug.print("Unknown command: {s}\n", .{command});
-        std.debug.print("Usage: Kilnexus_core bootstrap [Knxfile] [trust-dir]\n", .{});
+        printUsage();
         return error.InvalidCommand;
     }
 
-    const path = args.next() orelse "Knxfile";
-    const trust_dir = args.next() orelse "trust";
+    var positional: [5][]const u8 = undefined;
+    var positional_count: usize = 0;
+    while (args.next()) |arg| {
+        if (positional_count >= positional.len) {
+            printUsage();
+            return error.InvalidCommand;
+        }
+        positional[positional_count] = arg;
+        positional_count += 1;
+    }
+    const cli = parseBootstrapCliArgs(positional[0..positional_count]) catch {
+        printUsage();
+        return error.InvalidCommand;
+    };
 
-    var attempt = bootstrap.attemptRunFromPathWithOptions(allocator, path, .{
-        .trust_metadata_dir = trust_dir,
+    var attempt = bootstrap.attemptRunFromPathWithOptions(allocator, cli.path, .{
+        .trust_metadata_dir = cli.trust_dir,
         .trust_state_path = ".kilnexus-trust-state.json",
+        .cache_root = cli.cache_root,
+        .output_root = cli.output_root,
     });
 
     switch (attempt) {
@@ -59,7 +80,7 @@ pub fn main() !void {
             std.debug.print("Knx digest: {s}\n", .{run_result.knx_digest_hex[0..]});
             std.debug.print("Workspace cwd: {s}\n", .{run_result.workspace_cwd});
             std.debug.print("Canonical lockfile bytes: {d}\n", .{run_result.canonical_json.len});
-            printCurrentPointerSummary(allocator, "kilnexus-out") catch |err| {
+            printCurrentPointerSummary(allocator, cli.output_root) catch |err| {
                 std.debug.print("Current pointer read failed: {s}\n", .{@errorName(err)});
             };
 
@@ -91,6 +112,24 @@ pub fn main() !void {
             return error.BootstrapFailed;
         },
     }
+}
+
+fn printUsage() void {
+    std.debug.print(
+        "Usage: Kilnexus_core bootstrap [Knxfile] [trust-dir] [cache-root] [output-root]\n",
+        .{},
+    );
+}
+
+fn parseBootstrapCliArgs(args: []const []const u8) !BootstrapCliArgs {
+    if (args.len > 4) return error.InvalidCommand;
+
+    var output: BootstrapCliArgs = .{};
+    if (args.len >= 1) output.path = args[0];
+    if (args.len >= 2) output.trust_dir = args[1];
+    if (args.len >= 3) output.cache_root = args[2];
+    if (args.len >= 4) output.output_root = args[3];
+    return output;
 }
 
 fn printCurrentPointerSummary(allocator: std.mem.Allocator, output_root: []const u8) !void {
@@ -190,4 +229,30 @@ test "parseCurrentPointerSummary rejects missing required fields" {
         \\}
     ;
     try std.testing.expectError(error.InvalidCurrentPointer, parseCurrentPointerSummary(allocator, raw));
+}
+
+test "parseBootstrapCliArgs applies defaults and optional overrides" {
+    const defaults = try parseBootstrapCliArgs(&.{});
+    try std.testing.expectEqualStrings("Knxfile", defaults.path);
+    try std.testing.expectEqualStrings("trust", defaults.trust_dir);
+    try std.testing.expectEqualStrings(".kilnexus-cache", defaults.cache_root);
+    try std.testing.expectEqualStrings("kilnexus-out", defaults.output_root);
+
+    const custom = try parseBootstrapCliArgs(&.{
+        "Custom.knx",
+        "custom-trust",
+        "cache-dir",
+        "out-dir",
+    });
+    try std.testing.expectEqualStrings("Custom.knx", custom.path);
+    try std.testing.expectEqualStrings("custom-trust", custom.trust_dir);
+    try std.testing.expectEqualStrings("cache-dir", custom.cache_root);
+    try std.testing.expectEqualStrings("out-dir", custom.output_root);
+}
+
+test "parseBootstrapCliArgs rejects too many positional arguments" {
+    try std.testing.expectError(
+        error.InvalidCommand,
+        parseBootstrapCliArgs(&.{ "a", "b", "c", "d", "e" }),
+    );
 }
