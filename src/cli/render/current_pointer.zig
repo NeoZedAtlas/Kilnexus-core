@@ -1,0 +1,105 @@
+const std = @import("std");
+const types = @import("../types.zig");
+
+pub fn printCurrentPointerSummary(allocator: std.mem.Allocator, output_root: []const u8) !void {
+    var summary = try readCurrentPointerSummary(allocator, output_root);
+    defer summary.deinit(allocator);
+    const release_abs = try std.fs.path.join(allocator, &.{ output_root, summary.release_rel });
+    defer allocator.free(release_abs);
+
+    std.debug.print("Published build id: {s}\n", .{summary.build_id});
+    std.debug.print("Published release path: {s}\n", .{release_abs});
+    if (summary.verify_mode) |verify_mode| {
+        std.debug.print("Published verify mode: {s}\n", .{verify_mode});
+    }
+    if (summary.toolchain_tree_root) |tree_root| {
+        std.debug.print("Published toolchain tree root: {s}\n", .{tree_root});
+    }
+}
+
+pub fn readCurrentPointerSummary(allocator: std.mem.Allocator, output_root: []const u8) !types.CurrentPointerSummary {
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+
+    const raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 1024 * 1024);
+    defer allocator.free(raw);
+
+    return parseCurrentPointerSummary(allocator, raw);
+}
+
+pub fn parseCurrentPointerSummary(allocator: std.mem.Allocator, raw: []const u8) !types.CurrentPointerSummary {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.InvalidCurrentPointer,
+    };
+    const build_id = try requireStringField(root, "build_id");
+    const release_rel = try requireStringField(root, "release_rel");
+    const verify_mode = optionalStringField(root, "verify_mode");
+    const toolchain_tree_root = optionalStringField(root, "toolchain_tree_root");
+
+    const out_build_id = try allocator.dupe(u8, build_id);
+    errdefer allocator.free(out_build_id);
+    const out_release_rel = try allocator.dupe(u8, release_rel);
+    errdefer allocator.free(out_release_rel);
+    const out_verify_mode = if (verify_mode) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (out_verify_mode) |value| allocator.free(value);
+    const out_tree_root = if (toolchain_tree_root) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (out_tree_root) |value| allocator.free(value);
+
+    return .{
+        .build_id = out_build_id,
+        .release_rel = out_release_rel,
+        .verify_mode = out_verify_mode,
+        .toolchain_tree_root = out_tree_root,
+    };
+}
+
+fn requireStringField(object: std.json.ObjectMap, key: []const u8) ![]const u8 {
+    const value = object.get(key) orelse return error.InvalidCurrentPointer;
+    return switch (value) {
+        .string => |text| text,
+        else => error.InvalidCurrentPointer,
+    };
+}
+
+fn optionalStringField(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = object.get(key) orelse return null;
+    return switch (value) {
+        .string => |text| text,
+        else => null,
+    };
+}
+
+test "parseCurrentPointerSummary parses required and optional fields" {
+    const allocator = std.testing.allocator;
+    const raw =
+        \\{
+        \\  "version": 2,
+        \\  "build_id": "build-42",
+        \\  "release_rel": "releases/build-42",
+        \\  "verify_mode": "strict",
+        \\  "toolchain_tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\}
+    ;
+    var summary = try parseCurrentPointerSummary(allocator, raw);
+    defer summary.deinit(allocator);
+    try std.testing.expectEqualStrings("build-42", summary.build_id);
+    try std.testing.expectEqualStrings("releases/build-42", summary.release_rel);
+    try std.testing.expect(summary.verify_mode != null);
+    try std.testing.expect(summary.toolchain_tree_root != null);
+    try std.testing.expectEqualStrings("strict", summary.verify_mode.?);
+}
+
+test "parseCurrentPointerSummary rejects missing required fields" {
+    const allocator = std.testing.allocator;
+    const raw =
+        \\{
+        \\  "version": 2,
+        \\  "release_rel": "releases/build-42"
+        \\}
+    ;
+    try std.testing.expectError(error.InvalidCurrentPointer, parseCurrentPointerSummary(allocator, raw));
+}
