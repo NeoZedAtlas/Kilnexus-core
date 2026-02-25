@@ -13,18 +13,26 @@ pub fn executeBuildGraph(
     options: ExecuteOptions,
 ) !void {
     var zig_exe_path: ?[]u8 = null;
+    var zig_lib_dir: ?[]u8 = null;
     defer if (zig_exe_path) |path| allocator.free(path);
+    defer if (zig_lib_dir) |path| allocator.free(path);
 
     for (build_spec.ops) |op| {
         switch (op) {
             .fs_copy => |copy| try executeFsCopy(allocator, workspace_cwd, copy),
             .c_compile => |compile| {
                 const zig_exe = try requireZigExecutable(allocator, options.toolchain_root, &zig_exe_path);
-                try executeCCompile(allocator, workspace_cwd, zig_exe, compile, options.max_output_bytes);
+                if (zig_lib_dir == null) {
+                    zig_lib_dir = try resolveZigLibDir(allocator, zig_exe);
+                }
+                try executeCCompile(allocator, workspace_cwd, zig_exe, zig_lib_dir.?, compile, options.max_output_bytes);
             },
             .zig_link => |link| {
                 const zig_exe = try requireZigExecutable(allocator, options.toolchain_root, &zig_exe_path);
-                try executeZigLink(allocator, workspace_cwd, zig_exe, link, options.max_output_bytes);
+                if (zig_lib_dir == null) {
+                    zig_lib_dir = try resolveZigLibDir(allocator, zig_exe);
+                }
+                try executeZigLink(allocator, workspace_cwd, zig_exe, zig_lib_dir.?, link, options.max_output_bytes);
             },
             .archive_pack => |pack| try executeArchivePack(allocator, workspace_cwd, pack),
         }
@@ -62,6 +70,7 @@ fn executeCCompile(
     allocator: std.mem.Allocator,
     workspace_cwd: []const u8,
     zig_exe: []const u8,
+    zig_lib_dir: []const u8,
     compile: validator.CCompileOp,
     max_output_bytes: usize,
 ) !void {
@@ -83,13 +92,14 @@ fn executeCCompile(
     try full_argv.append(allocator, compile.src_path);
     try full_argv.append(allocator, "-o");
     try full_argv.append(allocator, compile.out_path);
-    try runCommand(allocator, workspace_cwd, full_argv.items, max_output_bytes);
+    try runCommand(allocator, workspace_cwd, full_argv.items, max_output_bytes, zig_lib_dir);
 }
 
 fn executeZigLink(
     allocator: std.mem.Allocator,
     workspace_cwd: []const u8,
     zig_exe: []const u8,
+    zig_lib_dir: []const u8,
     link: validator.ZigLinkOp,
     max_output_bytes: usize,
 ) !void {
@@ -108,7 +118,7 @@ fn executeZigLink(
     try argv.append(allocator, "-o");
     try argv.append(allocator, link.out_path);
 
-    try runCommand(allocator, workspace_cwd, argv.items, max_output_bytes);
+    try runCommand(allocator, workspace_cwd, argv.items, max_output_bytes, zig_lib_dir);
 }
 
 fn executeArchivePack(
@@ -262,11 +272,19 @@ fn runCommand(
     workspace_cwd: []const u8,
     argv: []const []const u8,
     max_output_bytes: usize,
+    zig_lib_dir: ?[]const u8,
 ) !void {
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+    if (zig_lib_dir) |lib_dir| {
+        try env_map.put("ZIG_LIB_DIR", lib_dir);
+    }
+
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = argv,
         .cwd = workspace_cwd,
+        .env_map = &env_map,
         .max_output_bytes = max_output_bytes,
     }) catch |err| switch (err) {
         error.FileNotFound => return error.ToolchainNotFound,
@@ -292,6 +310,23 @@ fn requireZigExecutable(
     return cache.*.?;
 }
 
+fn resolveZigLibDir(allocator: std.mem.Allocator, zig_exe: []const u8) ![]u8 {
+    const exe_dir = std.fs.path.dirname(zig_exe) orelse return error.ToolchainNotFound;
+
+    const direct = try std.fs.path.join(allocator, &.{ exe_dir, "lib" });
+    errdefer allocator.free(direct);
+    if (try pathIsDirectory(direct)) return direct;
+    allocator.free(direct);
+
+    const parent = std.fs.path.dirname(exe_dir) orelse return error.ToolchainNotFound;
+    const from_parent = try std.fs.path.join(allocator, &.{ parent, "lib" });
+    errdefer allocator.free(from_parent);
+    if (try pathIsDirectory(from_parent)) return from_parent;
+    allocator.free(from_parent);
+
+    return error.ToolchainNotFound;
+}
+
 fn resolveZigExecutable(allocator: std.mem.Allocator, toolchain_root: []const u8) ![]u8 {
     const is_windows = @import("builtin").os.tag == .windows;
     const candidates = if (is_windows)
@@ -308,7 +343,11 @@ fn resolveZigExecutable(allocator: std.mem.Allocator, toolchain_root: []const u8
     for (candidates) |rel| {
         const candidate = try std.fs.path.join(allocator, &.{ toolchain_root, rel });
         errdefer allocator.free(candidate);
-        if (try pathIsFile(candidate)) return candidate;
+        if (try pathIsFile(candidate)) {
+            const absolute = try std.fs.cwd().realpathAlloc(allocator, candidate);
+            allocator.free(candidate);
+            return absolute;
+        }
         allocator.free(candidate);
     }
     return error.ToolchainNotFound;
@@ -328,6 +367,15 @@ fn pathIsFile(path: []const u8) !bool {
         else => return err,
     };
     file.close();
+    return true;
+}
+
+fn pathIsDirectory(path: []const u8) !bool {
+    var dir = std.fs.cwd().openDir(path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => return err,
+    };
+    dir.close();
     return true;
 }
 
