@@ -576,8 +576,9 @@ test "attemptRunWithOptions returns structured parse error" {
     });
 
     switch (attempt) {
-        .success => |*result| {
-            defer result.deinit(allocator);
+        .success => |result| {
+            var owned = result;
+            defer owned.deinit(allocator);
             return error.ExpectedFailure;
         },
         .failure => |failure| {
@@ -627,8 +628,9 @@ test "attemptRunWithOptions rejects build writes into mounted input path" {
     });
 
     switch (attempt) {
-        .success => |*result| {
-            defer result.deinit(allocator);
+        .success => |result| {
+            var owned = result;
+            defer owned.deinit(allocator);
             return error.ExpectedFailure;
         },
         .failure => |failure| {
@@ -675,8 +677,9 @@ test "attemptRunFromPathWithOptions returns canonical io cause for missing input
     });
 
     switch (attempt) {
-        .success => |*result| {
-            defer result.deinit(allocator);
+        .success => |result| {
+            var owned = result;
+            defer owned.deinit(allocator);
             return error.ExpectedFailure;
         },
         .failure => |failure| {
@@ -721,8 +724,9 @@ test "attemptRunWithOptions fails at download when source file is missing" {
     });
 
     switch (attempt) {
-        .success => |*result| {
-            defer result.deinit(allocator);
+        .success => |result| {
+            var owned = result;
+            defer owned.deinit(allocator);
             return error.ExpectedFailure;
         },
         .failure => |failure| {
@@ -769,8 +773,9 @@ test "attemptRunWithOptions fails in execute stage when declared source is missi
     });
 
     switch (attempt) {
-        .success => |*result| {
-            defer result.deinit(allocator);
+        .success => |result| {
+            var owned = result;
+            defer owned.deinit(allocator);
             return error.ExpectedFailure;
         },
         .failure => |failure| {
@@ -817,8 +822,9 @@ test "attemptRunWithOptions maps missing toolchain for c.compile to build failur
     });
 
     switch (attempt) {
-        .success => |*result| {
-            defer result.deinit(allocator);
+        .success => |result| {
+            var owned = result;
+            defer owned.deinit(allocator);
             return error.ExpectedFailure;
         },
         .failure => |failure| {
@@ -894,8 +900,9 @@ test "attemptRunWithOptions fails at verify_outputs on declared output sha misma
     });
 
     switch (attempt) {
-        .success => |*result| {
-            defer result.deinit(allocator);
+        .success => |result| {
+            var owned = result;
+            defer owned.deinit(allocator);
             return error.ExpectedFailure;
         },
         .failure => |failure| {

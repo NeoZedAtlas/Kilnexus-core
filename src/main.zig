@@ -74,26 +74,11 @@ pub fn main() !void {
             }
         },
         .failure => |failure| {
-            const descriptor = kx_error.describe(failure.code);
-            var error_id_buf: [128]u8 = undefined;
-            const error_id = kx_error.buildErrorId(
-                &error_id_buf,
-                failure.code,
-                @tagName(failure.at),
-                @errorName(failure.cause),
-            );
-            std.debug.print(
-                "{{\"status\":\"failed\",\"error_id\":\"{s}\",\"code\":\"{s}\",\"code_num\":{d},\"family\":\"{s}\",\"state\":\"{s}\",\"cause\":\"{s}\",\"summary\":\"{s}\"}}\n",
-                .{
-                    error_id,
-                    @tagName(failure.code),
-                    @intFromEnum(failure.code),
-                    @tagName(descriptor.family),
-                    @tagName(failure.at),
-                    @errorName(failure.cause),
-                    descriptor.summary,
-                },
-            );
+            if (cli.json_output) {
+                try printFailureJson(allocator, failure);
+            } else {
+                printFailureHuman(failure);
+            }
             return error.BootstrapFailed;
         },
     }
@@ -223,6 +208,68 @@ fn printSuccessHuman(allocator: std.mem.Allocator, run_result: *const bootstrap.
     }
 }
 
+fn printFailureHuman(failure: bootstrap.RunFailure) void {
+    const descriptor = kx_error.describe(failure.code);
+    var error_id_buf: [128]u8 = undefined;
+    const error_id = kx_error.buildErrorId(
+        &error_id_buf,
+        failure.code,
+        @tagName(failure.at),
+        @errorName(failure.cause),
+    );
+
+    std.debug.print("Bootstrap failed\n", .{});
+    std.debug.print("Error id: {s}\n", .{error_id});
+    std.debug.print("Code: {s} ({d})\n", .{ @tagName(failure.code), @intFromEnum(failure.code) });
+    std.debug.print("Family: {s}\n", .{@tagName(descriptor.family)});
+    std.debug.print("State: {s}\n", .{@tagName(failure.at)});
+    std.debug.print("Cause: {s}\n", .{@errorName(failure.cause)});
+    std.debug.print("Summary: {s}\n", .{descriptor.summary});
+}
+
+fn printFailureJson(allocator: std.mem.Allocator, failure: bootstrap.RunFailure) !void {
+    const output = try buildFailureJsonLine(allocator, failure);
+    defer allocator.free(output);
+    std.debug.print("{s}", .{output});
+}
+
+fn buildFailureJsonLine(allocator: std.mem.Allocator, failure: bootstrap.RunFailure) ![]u8 {
+    const descriptor = kx_error.describe(failure.code);
+    var error_id_buf: [128]u8 = undefined;
+    const error_id = kx_error.buildErrorId(
+        &error_id_buf,
+        failure.code,
+        @tagName(failure.at),
+        @errorName(failure.cause),
+    );
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var output_writer = output.writer(allocator);
+    var output_buffer: [1024]u8 = undefined;
+    var output_adapter = output_writer.adaptToNewApi(&output_buffer);
+    const writer = &output_adapter.new_interface;
+
+    try writer.writeAll("{\"status\":\"failed\",\"error_id\":");
+    try std.json.Stringify.encodeJsonString(error_id, .{}, writer);
+    try writer.writeAll(",\"code\":");
+    try std.json.Stringify.encodeJsonString(@tagName(failure.code), .{}, writer);
+    try writer.writeAll(",\"code_num\":");
+    try writer.print("{d}", .{@intFromEnum(failure.code)});
+    try writer.writeAll(",\"family\":");
+    try std.json.Stringify.encodeJsonString(@tagName(descriptor.family), .{}, writer);
+    try writer.writeAll(",\"state\":");
+    try std.json.Stringify.encodeJsonString(@tagName(failure.at), .{}, writer);
+    try writer.writeAll(",\"cause\":");
+    try std.json.Stringify.encodeJsonString(@errorName(failure.cause), .{}, writer);
+    try writer.writeAll(",\"summary\":");
+    try std.json.Stringify.encodeJsonString(descriptor.summary, .{}, writer);
+    try writer.writeAll("}\n");
+    try writer.flush();
+
+    return try output.toOwnedSlice(allocator);
+}
+
 fn printSuccessJson(
     allocator: std.mem.Allocator,
     run_result: *const bootstrap.RunResult,
@@ -260,6 +307,7 @@ fn printSuccessJson(
         try std.json.Stringify.encodeJsonString(@errorName(err), .{}, writer);
         try writeTraceJson(writer, run_result);
         try writer.writeAll("}\n");
+        try writer.flush();
         std.debug.print("{s}", .{output.items});
         return;
     };
@@ -285,6 +333,7 @@ fn printSuccessJson(
 
     try writeTraceJson(writer, run_result);
     try writer.writeAll("}\n");
+    try writer.flush();
     std.debug.print("{s}", .{output.items});
 }
 
@@ -473,4 +522,40 @@ test "parseBootstrapCliArgs rejects conflict between trust option and trust posi
 
 test "parseBootstrapCliArgs returns help requested" {
     try std.testing.expectError(error.HelpRequested, parseBootstrapCliArgs(&.{"--help"}));
+}
+
+test "buildFailureJsonLine renders stable failure payload" {
+    const allocator = std.testing.allocator;
+    const failure: bootstrap.RunFailure = .{
+        .at = .init,
+        .code = .KX_IO_NOT_FOUND,
+        .cause = error.IoNotFound,
+    };
+
+    const line = try buildFailureJsonLine(allocator, failure);
+    defer allocator.free(line);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const status = switch (root.get("status") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("failed", status);
+
+    const code = switch (root.get("code") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("KX_IO_NOT_FOUND", code);
+
+    const state = switch (root.get("state") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("init", state);
 }
