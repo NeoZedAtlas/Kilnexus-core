@@ -637,6 +637,125 @@ test "run supports TOML operators DAG with local inputs and source/publish_as ou
     try std.testing.expectEqualStrings("toml-artifact\n", bytes);
 }
 
+test "run supports TOML remote input extraction and mount projection" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var tar_out: std.Io.Writer.Allocating = .init(allocator);
+    defer tar_out.deinit();
+    var tar_writer: std.tar.Writer = .{
+        .underlying_writer = &tar_out.writer,
+    };
+    try tar_writer.writeFileBytes("pkg/remote.txt", "remote-run\n", .{});
+    try tar_writer.finishPedantically();
+    const tar_bytes = try tar_out.toOwnedSlice();
+    defer allocator.free(tar_bytes);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "remote.tar",
+        .data = tar_bytes,
+    });
+
+    const remote_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/remote.tar", .{tmp.sub_path[0..]});
+    defer allocator.free(remote_rel);
+    const remote_url = try std.fmt.allocPrint(allocator, "file://{s}", .{remote_rel});
+    defer allocator.free(remote_url);
+    var remote_file = try std.fs.cwd().openFile(remote_rel, .{});
+    defer remote_file.close();
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = try remote_file.read(&buf);
+        if (n == 0) break;
+        hasher.update(buf[0..n]);
+    }
+    var remote_digest: [32]u8 = undefined;
+    hasher.final(&remote_digest);
+    const remote_hex = std.fmt.bytesToHex(remote_digest, .lower);
+
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
+    defer allocator.free(cache_root);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/final/kilnexus-out", .{tmp.sub_path[0..]});
+    defer allocator.free(output_root);
+
+    const source = try std.fmt.allocPrint(
+        allocator,
+        \\version = 1
+        \\target = "x86_64-unknown-linux-musl"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.14.0"
+        \\blob_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        \\tree_root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\size = 1
+        \\
+        \\[policy]
+        \\network = "off"
+        \\clock = "fixed"
+        \\verify_mode = "strict"
+        \\
+        \\[env]
+        \\TZ = "UTC"
+        \\LANG = "C"
+        \\SOURCE_DATE_EPOCH = "1735689600"
+        \\
+        \\[[inputs.remote]]
+        \\id = "remote-src"
+        \\url = "{s}"
+        \\blob_sha256 = "{s}"
+        \\extract = true
+        \\
+        \\[[workspace.mounts]]
+        \\source = "remote-src/pkg/remote.txt"
+        \\target = "src/remote.txt"
+        \\mode = "0444"
+        \\
+        \\[[operators]]
+        \\id = "copy-remote"
+        \\run = "knx.fs.copy"
+        \\inputs = ["src/remote.txt"]
+        \\outputs = ["kilnexus-out/remote.txt"]
+        \\
+        \\[[outputs]]
+        \\source = "kilnexus-out/remote.txt"
+        \\publish_as = "remote.txt"
+        \\mode = "0644"
+    ,
+        .{ remote_url, remote_hex[0..] },
+    );
+    defer allocator.free(source);
+
+    var result = try runWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+        .cache_root = cache_root,
+        .output_root = output_root,
+    });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(State.done, result.final_state);
+
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer_raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 4096);
+    defer allocator.free(pointer_raw);
+    const pointer_doc = try std.json.parseFromSlice(std.json.Value, allocator, pointer_raw, .{});
+    defer pointer_doc.deinit();
+    const pointer_root = switch (pointer_doc.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const build_id = switch (pointer_root.get("build_id") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    const published = try std.fs.path.join(allocator, &.{ output_root, "releases", build_id, "remote.txt" });
+    defer allocator.free(published);
+    const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("remote-run\n", bytes);
+}
+
 test "run fails on malformed lockfile" {
     const allocator = std.testing.allocator;
     const source = "version=1";
