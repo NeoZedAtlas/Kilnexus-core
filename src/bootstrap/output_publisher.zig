@@ -4,6 +4,8 @@ const validator = @import("../knx/validator.zig");
 pub const PublishOptions = struct {
     output_root: []const u8 = "kilnexus-out",
     knx_digest_hex: ?[]const u8 = null,
+    verify_mode: ?[]const u8 = null,
+    toolchain_tree_root_hex: ?[]const u8 = null,
 };
 
 pub fn verifyWorkspaceOutputs(
@@ -104,6 +106,8 @@ pub fn atomicPublish(
         release_root,
         output_spec,
         options.knx_digest_hex,
+        options.verify_mode,
+        options.toolchain_tree_root_hex,
     );
 }
 
@@ -158,6 +162,8 @@ fn writeCurrentPointer(
     release_root: []const u8,
     output_spec: *const validator.OutputSpec,
     knx_digest_hex: ?[]const u8,
+    verify_mode: ?[]const u8,
+    toolchain_tree_root_hex: ?[]const u8,
 ) !void {
     const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
     defer allocator.free(pointer_path);
@@ -179,6 +185,14 @@ fn writeCurrentPointer(
     if (knx_digest_hex) |digest| {
         try writer.writeAll(",\"knx_digest\":");
         try std.json.Stringify.encodeJsonString(digest, .{}, writer);
+    }
+    if (verify_mode) |mode| {
+        try writer.writeAll(",\"verify_mode\":");
+        try std.json.Stringify.encodeJsonString(mode, .{}, writer);
+    }
+    if (toolchain_tree_root_hex) |tree_root| {
+        try writer.writeAll(",\"toolchain_tree_root\":");
+        try std.json.Stringify.encodeJsonString(tree_root, .{}, writer);
     }
     try writer.writeAll(",\"outputs\":[");
     for (output_spec.entries, 0..) |entry, idx| {
@@ -270,6 +284,9 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
     try verifyWorkspaceOutputs(allocator, workspace_cwd, &spec);
     try atomicPublish(allocator, workspace_cwd, &spec, "build-test", .{
         .output_root = output_root,
+        .knx_digest_hex = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        .verify_mode = "strict",
+        .toolchain_tree_root_hex = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
 
     const published = try std.fs.path.join(allocator, &.{ output_root, "releases", "build-test", "app" });
@@ -295,6 +312,21 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
     const release_rel_val = root.get("release_rel") orelse return error.TestUnexpectedResult;
     switch (release_rel_val) {
         .string => |str| try std.testing.expectEqualStrings("releases/build-test", str),
+        else => return error.TestUnexpectedResult,
+    }
+    const knx_val = root.get("knx_digest") orelse return error.TestUnexpectedResult;
+    switch (knx_val) {
+        .string => |str| try std.testing.expectEqualStrings("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", str),
+        else => return error.TestUnexpectedResult,
+    }
+    const verify_mode_val = root.get("verify_mode") orelse return error.TestUnexpectedResult;
+    switch (verify_mode_val) {
+        .string => |str| try std.testing.expectEqualStrings("strict", str),
+        else => return error.TestUnexpectedResult,
+    }
+    const tree_root_val = root.get("toolchain_tree_root") orelse return error.TestUnexpectedResult;
+    switch (tree_root_val) {
+        .string => |str| try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", str),
         else => return error.TestUnexpectedResult,
     }
     const outputs_val = root.get("outputs") orelse return error.TestUnexpectedResult;
@@ -417,6 +449,13 @@ test "atomicPublish allows multiple builds under releases namespace" {
     try atomicPublish(allocator, workspace_cwd, &spec, "build-a", .{
         .output_root = output_root,
     });
+
+    const workspace_output = try std.fs.path.join(allocator, &.{ workspace_cwd, "kilnexus-out/app" });
+    defer allocator.free(workspace_output);
+    try std.fs.cwd().writeFile(.{
+        .sub_path = workspace_output,
+        .data = "artifact-b\n",
+    });
     try atomicPublish(allocator, workspace_cwd, &spec, "build-b", .{
         .output_root = output_root,
     });
@@ -427,4 +466,29 @@ test "atomicPublish allows multiple builds under releases namespace" {
     defer allocator.free(b_path);
     try std.testing.expect(try pathExists(a_path));
     try std.testing.expect(try pathExists(b_path));
+
+    const b_bytes = try std.fs.cwd().readFileAlloc(allocator, b_path, 1024);
+    defer allocator.free(b_bytes);
+    try std.testing.expectEqualStrings("artifact-b\n", b_bytes);
+
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer_raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 2048);
+    defer allocator.free(pointer_raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, pointer_raw, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const build_id = switch (root.get("build_id") orelse return error.TestUnexpectedResult) {
+        .string => |str| str,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("build-b", build_id);
+    const release_rel = switch (root.get("release_rel") orelse return error.TestUnexpectedResult) {
+        .string => |str| str,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("releases/build-b", release_rel);
 }

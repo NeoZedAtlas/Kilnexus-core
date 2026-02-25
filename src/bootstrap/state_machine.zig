@@ -316,6 +316,8 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
     output_publisher.atomicPublish(allocator, workspace_cwd, &output_spec, build_id, .{
         .output_root = options.output_root,
         .knx_digest_hex = knx_digest_hex[0..],
+        .verify_mode = @tagName(validation.verify_mode),
+        .toolchain_tree_root_hex = tree_hex[0..],
     }) catch |err| {
         failed_at.* = .atomic_publish;
         push(&trace, allocator, .failed) catch {};
@@ -499,11 +501,21 @@ test "run completes bootstrap happy path" {
         .string => |text| text,
         else => return error.TestUnexpectedResult,
     };
+    const pointer_verify_mode = switch (pointer_obj.get("verify_mode") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    const pointer_tree_root = switch (pointer_obj.get("toolchain_tree_root") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
     const pointer_release = switch (pointer_obj.get("release_rel") orelse return error.TestUnexpectedResult) {
         .string => |text| text,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings(result.knx_digest_hex[0..], pointer_knx);
+    try std.testing.expectEqualStrings("strict", pointer_verify_mode);
+    try std.testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", pointer_tree_root);
 
     const published = try std.fs.path.join(allocator, &.{ output_root, pointer_release, "app" });
     defer allocator.free(published);
