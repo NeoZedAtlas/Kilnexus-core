@@ -59,6 +59,7 @@ pub const Code = enum(u32) {
     KX_BUILD_SANDBOX_VIOLATION = 5004,
     KX_BUILD_GRAPH_INVALID = 5005,
     KX_BUILD_TIMEOUT = 5006,
+    KX_BUILD_NOT_IMPLEMENTED = 5007,
 
     KX_PUBLISH_ATOMIC = 6001,
     KX_PUBLISH_OUTPUT_MISSING = 6002,
@@ -91,6 +92,7 @@ pub const BuildError = error{
     SandboxViolation,
     GraphInvalid,
     Timeout,
+    NotImplemented,
     Internal,
 };
 
@@ -164,6 +166,7 @@ pub fn describe(code: Code) Descriptor {
         .KX_BUILD_SANDBOX_VIOLATION => .{ .family = .build, .summary = "sandbox policy violation during build" },
         .KX_BUILD_GRAPH_INVALID => .{ .family = .build, .summary = "build graph is invalid" },
         .KX_BUILD_TIMEOUT => .{ .family = .build, .summary = "build step timeout exceeded" },
+        .KX_BUILD_NOT_IMPLEMENTED => .{ .family = .build, .summary = "build feature is not implemented in current MVP" },
 
         .KX_PUBLISH_ATOMIC => .{ .family = .publish, .summary = "atomic publish failed" },
         .KX_PUBLISH_OUTPUT_MISSING => .{ .family = .publish, .summary = "declared output missing at publish boundary" },
@@ -319,6 +322,10 @@ pub fn classifyBuild(err: anyerror) Code {
         return .KX_BUILD_TIMEOUT;
     }
 
+    if (err == error.NotImplemented) {
+        return .KX_BUILD_NOT_IMPLEMENTED;
+    }
+
     return .KX_INTERNAL;
 }
 
@@ -397,6 +404,10 @@ pub fn normalizeBuild(err: anyerror) BuildError {
 
     if (err == error.Timeout) {
         return error.Timeout;
+    }
+
+    if (err == error.NotImplemented) {
+        return error.NotImplemented;
     }
 
     return error.Internal;

@@ -56,7 +56,7 @@ test "parseLockfile normalizes CRLF and trims outer whitespace" {
     defer allocator.free(parsed.canonical_json);
 
     try std.testing.expectEqualStrings(
-        "{\"version\":1,\"target\":\"x86_64-unknown-linux-musl\"}",
+        "{\"target\":\"x86_64-unknown-linux-musl\",\"version\":1}",
         parsed.canonical_json,
     );
 }
@@ -70,10 +70,33 @@ test "parseLockfile handles buffer growth" {
     defer allocator.free(parsed.canonical_json);
 
     try std.testing.expect(parsed.canonical_json.len > 64);
-    try std.testing.expectEqualStrings(long_source, parsed.canonical_json);
+    try std.testing.expectEqualStrings(
+        "{\"payload\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+        parsed.canonical_json,
+    );
 }
 
 test "parseLockfileStrict rejects empty input" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.EmptyInput, parseLockfileStrict(allocator, "   \r\n"));
+}
+
+test "parseLockfile parses TOML into canonical JSON" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\version = 1
+        \\target = "x86_64-unknown-linux-musl"
+        \\
+        \\[policy]
+        \\network = "off"
+        \\clock = "fixed"
+        \\verify_mode = "strict"
+    ;
+    const parsed = try parseLockfile(allocator, source);
+    defer allocator.free(parsed.canonical_json);
+
+    try std.testing.expectEqualStrings(
+        "{\"policy\":{\"clock\":\"fixed\",\"network\":\"off\",\"verify_mode\":\"strict\"},\"target\":\"x86_64-unknown-linux-musl\",\"version\":1}",
+        parsed.canonical_json,
+    );
 }

@@ -31,7 +31,7 @@ pub fn normalize(err: anyerror) ParseError {
         return error.TypeMismatch;
     }
 
-    if (err == error.ValueInvalid or err == error.InvalidHexLength or err == error.InvalidHexChar or err == error.InvalidPositiveInt or err == error.InvalidPolicyNetwork or err == error.InvalidPolicyClock or err == error.InvalidEnvTZ or err == error.InvalidEnvLang or err == error.InvalidDigits or err == error.InvalidVerifyMode or err == error.EmptyString) {
+    if (err == error.ValueInvalid or err == error.InvalidHexLength or err == error.InvalidHexChar or err == error.InvalidPositiveInt or err == error.InvalidPolicyNetwork or err == error.InvalidPolicyClock or err == error.InvalidEnvTZ or err == error.InvalidEnvLang or err == error.InvalidDigits or err == error.InvalidVerifyMode or err == error.EmptyString or err == error.InvalidBuildGraph) {
         return error.ValueInvalid;
     }
 

@@ -37,6 +37,46 @@ pub const CasDomain = enum {
     local,
 };
 
+pub const LocalInputSpec = struct {
+    id: []u8,
+    include: [][]u8,
+    exclude: [][]u8,
+
+    pub fn deinit(self: *LocalInputSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        for (self.include) |pattern| allocator.free(pattern);
+        allocator.free(self.include);
+        for (self.exclude) |pattern| allocator.free(pattern);
+        allocator.free(self.exclude);
+        self.* = undefined;
+    }
+};
+
+pub const RemoteInputSpec = struct {
+    id: []u8,
+    url: []u8,
+    blob_sha256: [32]u8,
+    extract: bool,
+
+    pub fn deinit(self: *RemoteInputSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.url);
+        self.* = undefined;
+    }
+};
+
+pub const WorkspaceMountSpec = struct {
+    source: []u8,
+    target: []u8,
+    mode: u16,
+
+    pub fn deinit(self: *WorkspaceMountSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.source);
+        allocator.free(self.target);
+        self.* = undefined;
+    }
+};
+
 pub const WorkspaceEntry = struct {
     mount_path: []u8,
     host_source: ?[]u8 = null,
@@ -53,21 +93,40 @@ pub const WorkspaceEntry = struct {
 
 pub const WorkspaceSpec = struct {
     entries: []WorkspaceEntry,
+    local_inputs: ?[]LocalInputSpec = null,
+    remote_inputs: ?[]RemoteInputSpec = null,
+    mounts: ?[]WorkspaceMountSpec = null,
 
     pub fn deinit(self: *WorkspaceSpec, allocator: std.mem.Allocator) void {
         for (self.entries) |*entry| entry.deinit(allocator);
         allocator.free(self.entries);
+        if (self.local_inputs) |inputs| {
+            for (inputs) |*input| input.deinit(allocator);
+            allocator.free(inputs);
+        }
+        if (self.remote_inputs) |inputs| {
+            for (inputs) |*input| input.deinit(allocator);
+            allocator.free(inputs);
+        }
+        if (self.mounts) |mounts| {
+            for (mounts) |*mount| mount.deinit(allocator);
+            allocator.free(mounts);
+        }
         self.* = undefined;
     }
 };
 
 pub const OutputEntry = struct {
     path: []u8,
+    source_path: ?[]u8 = null,
+    publish_as: ?[]u8 = null,
     mode: u16,
     sha256: ?[32]u8 = null,
 
     pub fn deinit(self: *OutputEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
+        if (self.source_path) |path| allocator.free(path);
+        if (self.publish_as) |name| allocator.free(name);
         self.* = undefined;
     }
 };
@@ -200,8 +259,15 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
     if (outputs.items.len == 0) return error.OutputsEmpty;
     for (outputs.items) |entry| {
         const output = try expectObject(entry, "output");
-        const path = try expectNonEmptyString(output, "path");
-        try validateOutputPath(path);
+        if (output.get("source") != null or output.get("publish_as") != null) {
+            const source = try expectNonEmptyString(output, "source");
+            try validateWorkspaceRelativePath(source);
+            const publish_as = try expectNonEmptyString(output, "publish_as");
+            try validatePublishName(publish_as);
+        } else {
+            const path = try expectNonEmptyString(output, "path");
+            try validateOutputPath(path);
+        }
         const mode = try expectNonEmptyString(output, "mode");
         try expectModeString(mode);
         if (output.get("sha256")) |_| {
@@ -212,7 +278,11 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
     if (root.get("operators")) |operators_value| {
         const operators = try expectArray(operators_value, "operators");
         for (operators.items) |op_value| {
-            const op = try expectString(op_value, "operator");
+            const op = switch (op_value) {
+                .string => |name| name,
+                .object => |obj| try expectNonEmptyString(obj, "run"),
+                else => return error.ExpectedString,
+            };
             if (!isAllowedOperator(op)) return error.OperatorNotAllowed;
         }
     }
@@ -272,17 +342,59 @@ pub fn parseWorkspaceSpec(allocator: std.mem.Allocator, canonical_json: []const 
         entries.deinit(allocator);
     }
 
+    var local_inputs: std.ArrayList(LocalInputSpec) = .empty;
+    errdefer {
+        for (local_inputs.items) |*input| input.deinit(allocator);
+        local_inputs.deinit(allocator);
+    }
+
+    var remote_inputs: std.ArrayList(RemoteInputSpec) = .empty;
+    errdefer {
+        for (remote_inputs.items) |*input| input.deinit(allocator);
+        remote_inputs.deinit(allocator);
+    }
+
+    var mounts: std.ArrayList(WorkspaceMountSpec) = .empty;
+    errdefer {
+        for (mounts.items) |*mount| mount.deinit(allocator);
+        mounts.deinit(allocator);
+    }
+
     if (root.get("inputs")) |inputs_value| {
-        const inputs = try expectArray(inputs_value, "inputs");
-        try parseWorkspaceEntries(allocator, &entries, inputs, false);
+        switch (inputs_value) {
+            .array => |inputs| {
+                try parseWorkspaceEntries(allocator, &entries, inputs, false);
+            },
+            .object => |inputs_obj| {
+                if (inputs_obj.get("local")) |locals_value| {
+                    const locals = try expectArray(locals_value, "inputs.local");
+                    try parseLocalInputs(allocator, &local_inputs, locals);
+                }
+                if (inputs_obj.get("remote")) |remotes_value| {
+                    const remotes = try expectArray(remotes_value, "inputs.remote");
+                    try parseRemoteInputs(allocator, &remote_inputs, remotes);
+                }
+            },
+            else => return error.ExpectedArray,
+        }
     }
     if (root.get("deps")) |deps_value| {
         const deps = try expectArray(deps_value, "deps");
         try parseWorkspaceEntries(allocator, &entries, deps, true);
     }
+    if (root.get("workspace")) |workspace_value| {
+        const workspace = try expectObject(workspace_value, "workspace");
+        if (workspace.get("mounts")) |mounts_value| {
+            const mounts_array = try expectArray(mounts_value, "workspace.mounts");
+            try parseWorkspaceMounts(allocator, &mounts, mounts_array);
+        }
+    }
 
     return .{
         .entries = try entries.toOwnedSlice(allocator),
+        .local_inputs = try local_inputs.toOwnedSlice(allocator),
+        .remote_inputs = try remote_inputs.toOwnedSlice(allocator),
+        .mounts = try mounts.toOwnedSlice(allocator),
     };
 }
 
@@ -306,20 +418,41 @@ pub fn parseOutputSpec(allocator: std.mem.Allocator, canonical_json: []const u8)
 
     for (outputs.items) |item| {
         const obj = try expectObject(item, "output");
-        const path_text = try expectNonEmptyString(obj, "path");
-        try validateOutputPath(path_text);
         const mode_text = try expectNonEmptyString(obj, "mode");
         const mode = try parseOutputMode(mode_text);
         const sha256 = if (obj.get("sha256")) |sha_value| blk: {
             const sha_text = try expectString(sha_value, "sha256");
             break :blk try parseHexFixed(32, sha_text);
         } else null;
-
-        const path = try allocator.dupe(u8, path_text);
-        errdefer allocator.free(path);
+        var path: ?[]u8 = null;
+        var source_path: ?[]u8 = null;
+        var publish_as: ?[]u8 = null;
+        errdefer {
+            if (path) |value| allocator.free(value);
+            if (source_path) |value| allocator.free(value);
+            if (publish_as) |value| allocator.free(value);
+        }
+        if (obj.get("source") != null or obj.get("publish_as") != null) {
+            const source_text = try expectNonEmptyString(obj, "source");
+            const publish_text = try expectNonEmptyString(obj, "publish_as");
+            try validateWorkspaceRelativePath(source_text);
+            try validatePublishName(publish_text);
+            path = try allocator.dupe(u8, source_text);
+            source_path = try allocator.dupe(u8, source_text);
+            publish_as = try allocator.dupe(u8, publish_text);
+        } else {
+            const path_text = try expectNonEmptyString(obj, "path");
+            try validateOutputPath(path_text);
+            path = try allocator.dupe(u8, path_text);
+            const rel = try outputRelativePath(path_text);
+            source_path = try allocator.dupe(u8, path_text);
+            publish_as = try allocator.dupe(u8, rel);
+        }
 
         try entries.append(allocator, .{
-            .path = path,
+            .path = path.?,
+            .source_path = source_path,
+            .publish_as = publish_as,
             .mode = mode,
             .sha256 = sha256,
         });
@@ -339,6 +472,10 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
     defer parsed.deinit();
 
     const root = try expectObject(parsed.value, "root");
+    if (root.get("operators")) |operators_value| {
+        const operators = try expectArray(operators_value, "operators");
+        return parseOperatorsBuildSpec(allocator, operators);
+    }
     const build_value = root.get("build") orelse {
         return .{
             .ops = try allocator.alloc(BuildOp, 0),
@@ -483,6 +620,194 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
     };
 }
 
+const OperatorDecl = struct {
+    id: []u8,
+    run: []u8,
+    inputs: [][]u8,
+    outputs: [][]u8,
+    flags: [][]u8,
+    archive_format: ArchiveFormat = .tar,
+
+    fn deinit(self: *OperatorDecl, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.run);
+        freeOwnedStrings(allocator, self.inputs);
+        freeOwnedStrings(allocator, self.outputs);
+        freeOwnedStrings(allocator, self.flags);
+        self.* = undefined;
+    }
+};
+
+fn parseOperatorsBuildSpec(allocator: std.mem.Allocator, operators: std.json.Array) !BuildSpec {
+    var decls: std.ArrayList(OperatorDecl) = .empty;
+    defer {
+        for (decls.items) |*decl| decl.deinit(allocator);
+        decls.deinit(allocator);
+    }
+
+    for (operators.items) |item| {
+        const obj = try expectObject(item, "operator");
+        const id_text = try expectNonEmptyString(obj, "id");
+        const run_text = try expectNonEmptyString(obj, "run");
+        if (!isAllowedOperator(run_text)) return error.OperatorNotAllowed;
+
+        const inputs = try parseStringArrayField(allocator, obj, "inputs");
+        errdefer freeOwnedStrings(allocator, inputs);
+        const outputs = try parseStringArrayField(allocator, obj, "outputs");
+        errdefer freeOwnedStrings(allocator, outputs);
+        const flags = if (obj.get("flags")) |_| try parseStringArrayField(allocator, obj, "flags") else try allocator.alloc([]u8, 0);
+        errdefer freeOwnedStrings(allocator, flags);
+
+        for (inputs) |path| try validateWorkspaceRelativePath(path);
+        for (outputs) |path| try validateWorkspaceRelativePath(path);
+
+        var archive_format: ArchiveFormat = .tar;
+        if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
+            if (obj.get("format")) |format_value| {
+                const format_text = try expectString(format_value, "archive format");
+                archive_format = parseArchiveFormat(format_text) orelse return error.ValueInvalid;
+            }
+        }
+
+        if (std.mem.eql(u8, run_text, "knx.fs.copy")) {
+            if (inputs.len != 1 or outputs.len != 1) return error.InvalidBuildGraph;
+            if (flags.len != 0) return error.ValueInvalid;
+        } else if (std.mem.eql(u8, run_text, "knx.c.compile")) {
+            if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
+            for (flags) |flag| {
+                if (!isAllowedCompileArg(flag)) return error.ValueInvalid;
+            }
+        } else if (std.mem.eql(u8, run_text, "knx.zig.link")) {
+            if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
+            for (flags) |flag| {
+                if (!isAllowedLinkArg(flag)) return error.ValueInvalid;
+            }
+        } else if (std.mem.eql(u8, run_text, "knx.archive.pack")) {
+            if (inputs.len < 1 or outputs.len != 1) return error.InvalidBuildGraph;
+            if (flags.len != 0) return error.ValueInvalid;
+        } else {
+            return error.OperatorNotAllowed;
+        }
+
+        try decls.append(allocator, .{
+            .id = try allocator.dupe(u8, id_text),
+            .run = try allocator.dupe(u8, run_text),
+            .inputs = inputs,
+            .outputs = outputs,
+            .flags = flags,
+            .archive_format = archive_format,
+        });
+    }
+
+    var output_producers: std.StringHashMap(usize) = .init(allocator);
+    defer output_producers.deinit();
+    for (decls.items, 0..) |decl, idx| {
+        for (decl.outputs) |output_path| {
+            const gop = try output_producers.getOrPut(output_path);
+            if (gop.found_existing) return error.InvalidBuildGraph;
+            gop.value_ptr.* = idx;
+        }
+    }
+
+    const count = decls.items.len;
+    var adjacency = try allocator.alloc(std.ArrayList(usize), count);
+    defer {
+        for (adjacency) |*edges| edges.deinit(allocator);
+        allocator.free(adjacency);
+    }
+    for (adjacency) |*edges| edges.* = .empty;
+
+    var indegree = try allocator.alloc(usize, count);
+    defer allocator.free(indegree);
+    @memset(indegree, 0);
+
+    for (decls.items, 0..) |decl, idx| {
+        for (decl.inputs) |input_path| {
+            const producer = output_producers.get(input_path) orelse continue;
+            if (producer == idx) return error.InvalidBuildGraph;
+            if (!containsIndex(adjacency[producer].items, idx)) {
+                try adjacency[producer].append(allocator, idx);
+                indegree[idx] += 1;
+            }
+        }
+    }
+
+    var queue: std.ArrayList(usize) = .empty;
+    defer queue.deinit(allocator);
+    for (indegree, 0..) |deg, idx| {
+        if (deg == 0) try queue.append(allocator, idx);
+    }
+
+    var ordered: std.ArrayList(usize) = .empty;
+    defer ordered.deinit(allocator);
+    var head: usize = 0;
+    while (head < queue.items.len) : (head += 1) {
+        const idx = queue.items[head];
+        try ordered.append(allocator, idx);
+        for (adjacency[idx].items) |next_idx| {
+            indegree[next_idx] -= 1;
+            if (indegree[next_idx] == 0) {
+                try queue.append(allocator, next_idx);
+            }
+        }
+    }
+    if (ordered.items.len != count) return error.InvalidBuildGraph;
+
+    var ops: std.ArrayList(BuildOp) = .empty;
+    errdefer {
+        for (ops.items) |*op| op.deinit(allocator);
+        ops.deinit(allocator);
+    }
+
+    for (ordered.items) |idx| {
+        const decl = decls.items[idx];
+        if (std.mem.eql(u8, decl.run, "knx.fs.copy")) {
+            try ops.append(allocator, .{
+                .fs_copy = .{
+                    .from_path = try allocator.dupe(u8, decl.inputs[0]),
+                    .to_path = try allocator.dupe(u8, decl.outputs[0]),
+                },
+            });
+            continue;
+        }
+        if (std.mem.eql(u8, decl.run, "knx.c.compile")) {
+            try ops.append(allocator, .{
+                .c_compile = .{
+                    .src_path = try allocator.dupe(u8, decl.inputs[0]),
+                    .out_path = try allocator.dupe(u8, decl.outputs[0]),
+                    .args = try dupeStringSlice(allocator, decl.flags),
+                },
+            });
+            continue;
+        }
+        if (std.mem.eql(u8, decl.run, "knx.zig.link")) {
+            try ops.append(allocator, .{
+                .zig_link = .{
+                    .object_paths = try dupeStringSlice(allocator, decl.inputs),
+                    .out_path = try allocator.dupe(u8, decl.outputs[0]),
+                    .args = try dupeStringSlice(allocator, decl.flags),
+                },
+            });
+            continue;
+        }
+        if (std.mem.eql(u8, decl.run, "knx.archive.pack")) {
+            try ops.append(allocator, .{
+                .archive_pack = .{
+                    .input_paths = try dupeStringSlice(allocator, decl.inputs),
+                    .out_path = try allocator.dupe(u8, decl.outputs[0]),
+                    .format = decl.archive_format,
+                },
+            });
+            continue;
+        }
+        return error.OperatorNotAllowed;
+    }
+
+    return .{
+        .ops = try ops.toOwnedSlice(allocator),
+    };
+}
+
 pub fn parseBuildSpecStrict(allocator: std.mem.Allocator, canonical_json: []const u8) parse_errors.ParseError!BuildSpec {
     return parseBuildSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
 }
@@ -497,6 +822,11 @@ pub fn validateBuildWriteIsolation(workspace_spec: *const WorkspaceSpec, build_s
         };
         for (workspace_spec.entries) |entry| {
             if (isEqualOrDescendant(write_path, entry.mount_path)) return error.ValueInvalid;
+        }
+        if (workspace_spec.mounts) |mounts| {
+            for (mounts) |mount| {
+                if (isEqualOrDescendant(write_path, mount.target)) return error.ValueInvalid;
+            }
         }
     }
 }
@@ -556,6 +886,108 @@ fn parseWorkspaceEntries(
     }
 }
 
+fn parseLocalInputs(
+    allocator: std.mem.Allocator,
+    locals: *std.ArrayList(LocalInputSpec),
+    items: std.json.Array,
+) !void {
+    for (items.items) |item| {
+        const obj = try expectObject(item, "local input");
+        const id_text = try expectNonEmptyString(obj, "id");
+        const include_array = try expectArrayField(obj, "include");
+
+        var include_patterns: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (include_patterns.items) |pattern| allocator.free(pattern);
+            include_patterns.deinit(allocator);
+        }
+        for (include_array.items) |entry| {
+            const pattern = try expectString(entry, "include pattern");
+            if (pattern.len == 0) return error.ValueInvalid;
+            try include_patterns.append(allocator, try allocator.dupe(u8, pattern));
+        }
+        if (include_patterns.items.len == 0) return error.ValueInvalid;
+
+        var exclude_patterns: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (exclude_patterns.items) |pattern| allocator.free(pattern);
+            exclude_patterns.deinit(allocator);
+        }
+        if (obj.get("exclude")) |exclude_value| {
+            const exclude_array = try expectArray(exclude_value, "exclude");
+            for (exclude_array.items) |entry| {
+                const pattern = try expectString(entry, "exclude pattern");
+                if (pattern.len == 0) return error.ValueInvalid;
+                try exclude_patterns.append(allocator, try allocator.dupe(u8, pattern));
+            }
+        }
+
+        const id = try allocator.dupe(u8, id_text);
+        errdefer allocator.free(id);
+
+        try locals.append(allocator, .{
+            .id = id,
+            .include = try include_patterns.toOwnedSlice(allocator),
+            .exclude = try exclude_patterns.toOwnedSlice(allocator),
+        });
+    }
+}
+
+fn parseRemoteInputs(
+    allocator: std.mem.Allocator,
+    remotes: *std.ArrayList(RemoteInputSpec),
+    items: std.json.Array,
+) !void {
+    for (items.items) |item| {
+        const obj = try expectObject(item, "remote input");
+        const id_text = try expectNonEmptyString(obj, "id");
+        const url_text = try expectNonEmptyString(obj, "url");
+        const blob_text = try expectNonEmptyString(obj, "blob_sha256");
+
+        const extract = if (obj.get("extract")) |extract_value| try expectBool(extract_value, "extract") else false;
+
+        const id = try allocator.dupe(u8, id_text);
+        errdefer allocator.free(id);
+        const url = try allocator.dupe(u8, url_text);
+        errdefer allocator.free(url);
+
+        try remotes.append(allocator, .{
+            .id = id,
+            .url = url,
+            .blob_sha256 = try parseHexFixed(32, blob_text),
+            .extract = extract,
+        });
+    }
+}
+
+fn parseWorkspaceMounts(
+    allocator: std.mem.Allocator,
+    mounts: *std.ArrayList(WorkspaceMountSpec),
+    items: std.json.Array,
+) !void {
+    for (items.items) |item| {
+        const obj = try expectObject(item, "workspace mount");
+        const source_text = try expectNonEmptyString(obj, "source");
+        const target_text = try expectNonEmptyString(obj, "target");
+        const mode_text = try expectNonEmptyString(obj, "mode");
+        const normalized_target = trimTrailingSlash(target_text);
+        try validateWorkspaceRelativePath(normalized_target);
+        const mode = try parseOutputMode(mode_text);
+        if (mode & 0o222 != 0) return error.ValueInvalid;
+
+        const source = try allocator.dupe(u8, source_text);
+        errdefer allocator.free(source);
+        const target = try allocator.dupe(u8, normalized_target);
+        errdefer allocator.free(target);
+
+        try mounts.append(allocator, .{
+            .source = source,
+            .target = target,
+            .mode = mode,
+        });
+    }
+}
+
 fn parseCasDomain(text: []const u8) ?CasDomain {
     if (std.mem.eql(u8, text, "official")) return .official;
     if (std.mem.eql(u8, text, "third_party")) return .third_party;
@@ -567,6 +999,55 @@ fn parseArchiveFormat(text: []const u8) ?ArchiveFormat {
     if (std.mem.eql(u8, text, "tar")) return .tar;
     if (std.mem.eql(u8, text, "tar.gz")) return .tar_gz;
     return null;
+}
+
+fn parseStringArrayField(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    key: []const u8,
+) ![][]u8 {
+    const value = object.get(key) orelse return error.MissingRequiredField;
+    const array = try expectArray(value, key);
+    if (array.items.len == 0) return error.ValueInvalid;
+
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |item| allocator.free(item);
+        out.deinit(allocator);
+    }
+    for (array.items) |item| {
+        const text = try expectString(item, key);
+        if (text.len == 0) return error.ValueInvalid;
+        try out.append(allocator, try allocator.dupe(u8, text));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn dupeStringSlice(allocator: std.mem.Allocator, items: [][]u8) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (out.items) |item| allocator.free(item);
+        out.deinit(allocator);
+    }
+    for (items) |item| {
+        try out.append(allocator, try allocator.dupe(u8, item));
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn containsIndex(items: []const usize, value: usize) bool {
+    for (items) |item| {
+        if (item == value) return true;
+    }
+    return false;
+}
+
+fn trimTrailingSlash(path: []const u8) []const u8 {
+    var out = path;
+    while (out.len > 0 and out[out.len - 1] == '/') {
+        out = out[0 .. out.len - 1];
+    }
+    return out;
 }
 
 fn parsePositiveU64(object: std.json.ObjectMap, key: []const u8) !u64 {
@@ -623,6 +1104,28 @@ fn validateOutputPath(path: []const u8) !void {
     if (rel.len == 0) return error.InvalidOutputPath;
 
     var it = std.mem.splitScalar(u8, rel, '/');
+    while (it.next()) |segment| {
+        if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) {
+            return error.InvalidOutputPath;
+        }
+    }
+}
+
+fn outputRelativePath(path: []const u8) ![]const u8 {
+    const prefix = "kilnexus-out/";
+    if (!std.mem.startsWith(u8, path, prefix)) return error.InvalidOutputPath;
+    const rel = path[prefix.len..];
+    if (rel.len == 0) return error.InvalidOutputPath;
+    return rel;
+}
+
+fn validatePublishName(name: []const u8) !void {
+    if (name.len == 0) return error.InvalidOutputPath;
+    if (std.fs.path.isAbsolute(name)) return error.InvalidOutputPath;
+    if (std.mem.indexOfScalar(u8, name, '\\') != null) return error.InvalidOutputPath;
+    if (std.mem.indexOfScalar(u8, name, ':') != null) return error.InvalidOutputPath;
+
+    var it = std.mem.splitScalar(u8, name, '/');
     while (it.next()) |segment| {
         if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) {
             return error.InvalidOutputPath;
@@ -765,6 +1268,13 @@ fn expectInteger(value: std.json.Value, _: []const u8) !i64 {
     return switch (value) {
         .integer => |number| number,
         else => error.ExpectedInteger,
+    };
+}
+
+fn expectBool(value: std.json.Value, _: []const u8) !bool {
+    return switch (value) {
+        .bool => |b| b,
+        else => error.TypeMismatch,
     };
 }
 

@@ -14,7 +14,8 @@ pub fn verifyWorkspaceOutputs(
     output_spec: *const validator.OutputSpec,
 ) !void {
     for (output_spec.entries) |entry| {
-        const source_path = try std.fs.path.join(allocator, &.{ workspace_cwd, entry.path });
+        const source_rel = try outputSourcePath(entry);
+        const source_path = try std.fs.path.join(allocator, &.{ workspace_cwd, source_rel });
         defer allocator.free(source_path);
 
         var file = std.fs.cwd().openFile(source_path, .{}) catch |err| switch (err) {
@@ -55,8 +56,9 @@ pub fn atomicPublish(
     if (try pathExists(release_root)) return error.AtomicRenameFailed;
 
     for (output_spec.entries) |entry| {
-        const rel = try outputRelativePath(entry.path);
-        const source_path = try std.fs.path.join(allocator, &.{ workspace_cwd, entry.path });
+        const rel = try outputPublishRel(entry);
+        const source_rel = try outputSourcePath(entry);
+        const source_path = try std.fs.path.join(allocator, &.{ workspace_cwd, source_rel });
         defer allocator.free(source_path);
         const staged_path = try std.fs.path.join(allocator, &.{ stage_root, rel });
         defer allocator.free(staged_path);
@@ -118,6 +120,16 @@ fn outputRelativePath(path: []const u8) ![]const u8 {
     const rel = path[prefix.len..];
     if (rel.len == 0) return error.OutputMissing;
     return rel;
+}
+
+fn outputSourcePath(entry: validator.OutputEntry) ![]const u8 {
+    if (entry.source_path) |source| return source;
+    return entry.path;
+}
+
+fn outputPublishRel(entry: validator.OutputEntry) ![]const u8 {
+    if (entry.publish_as) |publish_as| return publish_as;
+    return outputRelativePath(entry.path);
 }
 
 fn deletePathIfExists(path: []const u8) !void {
@@ -212,7 +224,8 @@ fn writeCurrentPointer(
     }
     try writer.writeAll(",\"outputs\":[");
     for (output_spec.entries, 0..) |entry, idx| {
-        const rel = try outputRelativePath(entry.path);
+        const rel = try outputPublishRel(entry);
+        const source_rel = try outputSourcePath(entry);
         const output_abs = try std.fs.path.join(allocator, &.{ release_root, rel });
         defer allocator.free(output_abs);
 
@@ -226,7 +239,9 @@ fn writeCurrentPointer(
 
         if (idx != 0) try writer.writeAll(",");
         try writer.writeAll("{\"path\":");
-        try std.json.Stringify.encodeJsonString(entry.path, .{}, writer);
+        try std.json.Stringify.encodeJsonString(source_rel, .{}, writer);
+        try writer.writeAll(",\"publish_as\":");
+        try std.json.Stringify.encodeJsonString(rel, .{}, writer);
         try writer.writeAll(",\"sha256\":\"");
         try writer.writeAll(digest_hex[0..]);
         try writer.writeAll("\",\"size\":");

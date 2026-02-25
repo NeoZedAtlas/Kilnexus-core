@@ -529,11 +529,119 @@ test "run completes bootstrap happy path" {
     try std.testing.expectEqualStrings("artifact\n", bytes);
 }
 
+test "run supports TOML operators DAG with local inputs and source/publish_as outputs" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project/src");
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/src/app.txt",
+        .data = "toml-artifact\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/src/skip.txt",
+        .data = "skip\n",
+    });
+
+    const app_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/src/app.txt", .{tmp.sub_path[0..]});
+    defer allocator.free(app_rel);
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/src/*.txt", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+    const exclude_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/src/skip*.txt", .{tmp.sub_path[0..]});
+    defer allocator.free(exclude_pat);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
+    defer allocator.free(cache_root);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/final/kilnexus-out", .{tmp.sub_path[0..]});
+    defer allocator.free(output_root);
+
+    const source = try std.fmt.allocPrint(
+        allocator,
+        \\version = 1
+        \\target = "x86_64-unknown-linux-musl"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.14.0"
+        \\blob_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        \\tree_root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        \\size = 1
+        \\
+        \\[policy]
+        \\network = "off"
+        \\clock = "fixed"
+        \\verify_mode = "strict"
+        \\
+        \\[env]
+        \\TZ = "UTC"
+        \\LANG = "C"
+        \\SOURCE_DATE_EPOCH = "1735689600"
+        \\
+        \\[[inputs.local]]
+        \\id = "local-src"
+        \\include = ["{s}"]
+        \\exclude = ["{s}"]
+        \\
+        \\[[workspace.mounts]]
+        \\source = "local-src/{s}"
+        \\target = "src/app.txt"
+        \\mode = "0444"
+        \\
+        \\[[operators]]
+        \\id = "copy-final"
+        \\run = "knx.fs.copy"
+        \\inputs = ["obj/app.txt"]
+        \\outputs = ["kilnexus-out/app.txt"]
+        \\
+        \\[[operators]]
+        \\id = "copy-obj"
+        \\run = "knx.fs.copy"
+        \\inputs = ["src/app.txt"]
+        \\outputs = ["obj/app.txt"]
+        \\
+        \\[[outputs]]
+        \\source = "kilnexus-out/app.txt"
+        \\publish_as = "app.txt"
+        \\mode = "0644"
+    ,
+        .{ include_pat, exclude_pat, app_rel },
+    );
+    defer allocator.free(source);
+
+    var result = try runWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+        .cache_root = cache_root,
+        .output_root = output_root,
+    });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(State.done, result.final_state);
+
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer_raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 4096);
+    defer allocator.free(pointer_raw);
+    const pointer_doc = try std.json.parseFromSlice(std.json.Value, allocator, pointer_raw, .{});
+    defer pointer_doc.deinit();
+    const pointer_root = switch (pointer_doc.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const build_id = switch (pointer_root.get("build_id") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+    const published = try std.fs.path.join(allocator, &.{ output_root, "releases", build_id, "app.txt" });
+    defer allocator.free(published);
+    const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("toml-artifact\n", bytes);
+}
+
 test "run fails on malformed lockfile" {
     const allocator = std.testing.allocator;
     const source = "version=1";
 
-    try std.testing.expectError(error.Schema, run(allocator, source));
+    try std.testing.expectError(error.MissingField, run(allocator, source));
 }
 
 test "run fails on policy violation" {
@@ -583,8 +691,8 @@ test "attemptRunWithOptions returns structured parse error" {
         },
         .failure => |failure| {
             try std.testing.expectEqual(State.parse_knxfile, failure.at);
-            try std.testing.expectEqual(kx_error.Code.KX_PARSE_SCHEMA, failure.code);
-            try std.testing.expectEqual(error.Schema, failure.cause);
+            try std.testing.expectEqual(kx_error.Code.KX_PARSE_MISSING_FIELD, failure.code);
+            try std.testing.expectEqual(error.MissingField, failure.cause);
         },
     }
 }
