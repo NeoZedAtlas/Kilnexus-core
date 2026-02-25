@@ -384,7 +384,7 @@ test "run supports TOML remote input extraction and mount projection" {
     });
     const expected_tree_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/expected", .{tmp.sub_path[0..]});
     defer allocator.free(expected_tree_rel);
-    const remote_tree_hex = try @import("workspace_projector.zig").computeTreeRootHexForDir(allocator, expected_tree_rel);
+    const remote_tree_hex = try @import("workspace/api.zig").computeTreeRootHexForDir(allocator, expected_tree_rel);
 
     const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
     defer allocator.free(cache_root);

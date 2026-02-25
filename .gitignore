@@ -1,0 +1,4 @@
+/.zig-cache/
+/.kilnexus-cache/
+/zig-out/
+/examples/

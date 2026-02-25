@@ -4,7 +4,7 @@ const parse_errors = @import("../../parser/parse_errors.zig");
 const validator = @import("../../knx/validator.zig");
 const mini_tuf = @import("../../trust/mini_tuf.zig");
 const toolchain_installer = @import("../toolchain_installer.zig");
-const workspace_projector = @import("../workspace_projector.zig");
+const workspace_api = @import("../workspace/api.zig");
 const build_executor = @import("../build_executor.zig");
 const output_publisher = @import("../output_publisher.zig");
 const state_types = @import("types.zig");
@@ -175,7 +175,7 @@ pub fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, opti
     }
 
     try push(&trace, allocator, .execute_build_graph);
-    var workspace_plan = workspace_projector.planWorkspace(allocator, &workspace_spec, .{
+    var workspace_plan = workspace_api.planWorkspace(allocator, &workspace_spec, .{
         .cache_root = options.cache_root,
     }) catch |err| {
         failed_at.* = .execute_build_graph;
@@ -189,7 +189,7 @@ pub fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, opti
         .{ knx_digest_hex[0..16], std.time.microTimestamp() },
     );
     defer allocator.free(build_id);
-    const workspace_cwd = workspace_projector.projectWorkspace(allocator, &workspace_plan, build_id, .{
+    const workspace_cwd = workspace_api.projectWorkspace(allocator, &workspace_plan, build_id, .{
         .cache_root = options.cache_root,
     }) catch |err| {
         failed_at.* = .execute_build_graph;
