@@ -1,6 +1,10 @@
 const std = @import("std");
 const bootstrap = @import("bootstrap/state_machine.zig");
 const kx_error = @import("errors/kx_error.zig");
+const abi_parser = @import("parser/abi_parser.zig");
+const parse_errors = @import("parser/parse_errors.zig");
+const validator = @import("knx/validator.zig");
+const max_knxfile_bytes: usize = 4 * 1024 * 1024;
 
 const CurrentPointerSummary = struct {
     build_id: []u8,
@@ -26,6 +30,41 @@ const BootstrapCliArgs = struct {
     json_output: bool = false,
 };
 
+const ParseOnlyCliArgs = struct {
+    path: []const u8 = "Knxfile",
+    json_output: bool = false,
+};
+
+const CliCommand = enum {
+    build,
+    validate,
+    plan,
+};
+
+const CommandSelection = struct {
+    command: CliCommand,
+    args: []const []const u8,
+};
+
+const KnxSummary = struct {
+    canonical_json: []u8,
+    validation: validator.ValidationSummary,
+    toolchain_spec: validator.ToolchainSpec,
+    workspace_spec: validator.WorkspaceSpec,
+    build_spec: validator.BuildSpec,
+    output_spec: validator.OutputSpec,
+    knx_digest_hex: [64]u8,
+
+    fn deinit(self: *KnxSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.canonical_json);
+        self.toolchain_spec.deinit(allocator);
+        self.workspace_spec.deinit(allocator);
+        self.build_spec.deinit(allocator);
+        self.output_spec.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -34,21 +73,52 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
 
-    _ = args.next();
-    const command = args.next() orelse "bootstrap";
-
-    if (!std.mem.eql(u8, command, "bootstrap")) {
-        std.debug.print("Unknown command: {s}\n", .{command});
-        printUsage();
-        return error.InvalidCommand;
-    }
-
     var cli_tokens: std.ArrayList([]const u8) = .empty;
     defer cli_tokens.deinit(allocator);
+    _ = args.next();
     while (args.next()) |arg| {
         try cli_tokens.append(allocator, arg);
     }
-    const cli = parseBootstrapCliArgs(cli_tokens.items) catch |err| {
+
+    const selection = selectCommand(cli_tokens.items) catch |err| {
+        if (err == error.HelpRequested) {
+            printUsage();
+            return;
+        }
+        if (cli_tokens.items.len > 0) {
+            std.debug.print("Unknown command: {s}\n", .{cli_tokens.items[0]});
+        } else {
+            std.debug.print("Invalid command\n", .{});
+        }
+        printUsage();
+        return error.InvalidCommand;
+    };
+
+    switch (selection.command) {
+        .build => try runBuildCommand(allocator, selection.args),
+        .validate => try runValidateCommand(allocator, selection.args),
+        .plan => try runPlanCommand(allocator, selection.args),
+    }
+}
+
+fn printUsage() void {
+    std.debug.print(
+        "Usage: Kilnexus_core [knx] <build|validate|plan> [args]\n",
+        .{},
+    );
+    std.debug.print("Or: Kilnexus_core [Knxfile] (defaults to build)\n", .{});
+    std.debug.print("Knxfile path must be extensionless (no .toml).\n", .{});
+    std.debug.print("build positional: [Knxfile] [trust-dir] [cache-root] [output-root]\n", .{});
+    std.debug.print(
+        "build options: --knxfile <path> --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --json --help\n",
+        .{},
+    );
+    std.debug.print("validate options: [Knxfile] --knxfile <path> --json --help\n", .{});
+    std.debug.print("plan options: [Knxfile] --knxfile <path> --json --help\n", .{});
+}
+
+fn runBuildCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const cli = parseBootstrapCliArgs(args) catch |err| {
         if (err == error.HelpRequested) {
             printUsage();
             return;
@@ -84,21 +154,146 @@ pub fn main() !void {
     }
 }
 
-fn printUsage() void {
-    std.debug.print(
-        "Usage: Kilnexus_core bootstrap [Knxfile] [trust-dir] [cache-root] [output-root] [options]\n",
-        .{},
-    );
-    std.debug.print("Knxfile path must be extensionless (no .toml).\n", .{});
-    std.debug.print(
-        "Options: --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --json --help\n",
-        .{},
-    );
+fn runValidateCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const cli = parseParseOnlyCliArgs(args) catch |err| {
+        if (err == error.HelpRequested) {
+            printUsage();
+            return;
+        }
+        printUsage();
+        return error.InvalidCommand;
+    };
+
+    var summary = loadKnxSummary(allocator, cli.path) catch |err| {
+        if (cli.json_output) {
+            try printSimpleFailureJson(allocator, "validate", err);
+        } else {
+            printSimpleFailureHuman("validate", err);
+        }
+        return error.InvalidCommand;
+    };
+    defer summary.deinit(allocator);
+
+    if (cli.json_output) {
+        try printValidateJson(allocator, &summary);
+    } else {
+        printValidateHuman(&summary);
+    }
+}
+
+fn runPlanCommand(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const cli = parseParseOnlyCliArgs(args) catch |err| {
+        if (err == error.HelpRequested) {
+            printUsage();
+            return;
+        }
+        printUsage();
+        return error.InvalidCommand;
+    };
+
+    var summary = loadKnxSummary(allocator, cli.path) catch |err| {
+        if (cli.json_output) {
+            try printSimpleFailureJson(allocator, "plan", err);
+        } else {
+            printSimpleFailureHuman("plan", err);
+        }
+        return error.InvalidCommand;
+    };
+    defer summary.deinit(allocator);
+
+    if (cli.json_output) {
+        try printPlanJson(allocator, &summary);
+    } else {
+        printPlanHuman(&summary);
+    }
+}
+
+fn selectCommand(tokens: []const []const u8) !CommandSelection {
+    if (tokens.len == 0) {
+        return .{ .command = .build, .args = tokens };
+    }
+
+    if (std.mem.eql(u8, tokens[0], "--help") or std.mem.eql(u8, tokens[0], "-h")) {
+        return error.HelpRequested;
+    }
+
+    if (std.mem.eql(u8, tokens[0], "knx")) {
+        if (tokens.len == 1) {
+            return .{ .command = .build, .args = tokens[1..] };
+        }
+        return parseNamedCommand(tokens[1], tokens[2..]);
+    }
+
+    if (isKnownCommand(tokens[0])) {
+        return parseNamedCommand(tokens[0], tokens[1..]);
+    }
+
+    if (std.mem.startsWith(u8, tokens[0], "--")) {
+        return .{ .command = .build, .args = tokens };
+    }
+
+    // Treat unknown first token as knxfile path for build convenience.
+    return .{ .command = .build, .args = tokens };
+}
+
+fn isKnownCommand(token: []const u8) bool {
+    return std.mem.eql(u8, token, "build") or
+        std.mem.eql(u8, token, "bootstrap") or
+        std.mem.eql(u8, token, "validate") or
+        std.mem.eql(u8, token, "plan");
+}
+
+fn parseNamedCommand(token: []const u8, args: []const []const u8) !CommandSelection {
+    if (std.mem.eql(u8, token, "build") or std.mem.eql(u8, token, "bootstrap")) {
+        return .{ .command = .build, .args = args };
+    }
+    if (std.mem.eql(u8, token, "validate")) {
+        return .{ .command = .validate, .args = args };
+    }
+    if (std.mem.eql(u8, token, "plan")) {
+        return .{ .command = .plan, .args = args };
+    }
+    return error.InvalidCommand;
+}
+
+fn parseParseOnlyCliArgs(args: []const []const u8) !ParseOnlyCliArgs {
+    var output: ParseOnlyCliArgs = .{};
+    var positional_index: usize = 0;
+    var path_set = false;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.HelpRequested;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--")) {
+            if (std.mem.eql(u8, arg, "--json")) {
+                output.json_output = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--knxfile")) {
+                output.path = try nextOptionValue(args, &i);
+                path_set = true;
+                continue;
+            }
+            return error.InvalidCommand;
+        }
+
+        if (positional_index > 0 or path_set) return error.InvalidCommand;
+        output.path = arg;
+        positional_index += 1;
+    }
+
+    try validateKnxfileCliPath(output.path);
+    return output;
 }
 
 fn parseBootstrapCliArgs(args: []const []const u8) !BootstrapCliArgs {
     var output: BootstrapCliArgs = .{};
     var positional_index: usize = 0;
+    var path_set = false;
     var trust_set = false;
     var cache_set = false;
     var output_set = false;
@@ -113,6 +308,11 @@ fn parseBootstrapCliArgs(args: []const []const u8) !BootstrapCliArgs {
         if (std.mem.startsWith(u8, arg, "--")) {
             if (std.mem.eql(u8, arg, "--json")) {
                 output.json_output = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--knxfile")) {
+                output.path = try nextOptionValue(args, &i);
+                path_set = true;
                 continue;
             }
             if (std.mem.eql(u8, arg, "--trust-off")) {
@@ -153,7 +353,10 @@ fn parseBootstrapCliArgs(args: []const []const u8) !BootstrapCliArgs {
         }
 
         switch (positional_index) {
-            0 => output.path = arg,
+            0 => {
+                if (path_set) return error.InvalidCommand;
+                output.path = arg;
+            },
             1 => {
                 if (trust_set) return error.InvalidCommand;
                 output.trust_dir = arg;
@@ -193,6 +396,229 @@ fn nextOptionValue(args: []const []const u8, index: *usize) ![]const u8 {
     const value = args[index.*];
     if (std.mem.startsWith(u8, value, "--")) return error.InvalidCommand;
     return value;
+}
+
+fn loadKnxSummary(allocator: std.mem.Allocator, path: []const u8) !KnxSummary {
+    try validateKnxfileCliPath(path);
+    const source = try std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes);
+    defer allocator.free(source);
+
+    const parsed = try abi_parser.parseLockfileStrict(allocator, source);
+    errdefer allocator.free(parsed.canonical_json);
+
+    const validation = try validator.validateCanonicalJsonStrict(allocator, parsed.canonical_json);
+
+    var toolchain_spec = try validator.parseToolchainSpecStrict(allocator, parsed.canonical_json);
+    errdefer toolchain_spec.deinit(allocator);
+
+    var workspace_spec = try validator.parseWorkspaceSpecStrict(allocator, parsed.canonical_json);
+    errdefer workspace_spec.deinit(allocator);
+
+    var build_spec = try validator.parseBuildSpecStrict(allocator, parsed.canonical_json);
+    errdefer build_spec.deinit(allocator);
+
+    validator.validateBuildWriteIsolation(&workspace_spec, &build_spec) catch |err| {
+        return parse_errors.normalize(err);
+    };
+
+    var output_spec = try validator.parseOutputSpecStrict(allocator, parsed.canonical_json);
+    errdefer output_spec.deinit(allocator);
+
+    const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
+    return .{
+        .canonical_json = parsed.canonical_json,
+        .validation = validation,
+        .toolchain_spec = toolchain_spec,
+        .workspace_spec = workspace_spec,
+        .build_spec = build_spec,
+        .output_spec = output_spec,
+        .knx_digest_hex = knx_digest_hex,
+    };
+}
+
+fn countOptionalSlice(comptime T: type, value: ?[]T) usize {
+    return if (value) |items| items.len else 0;
+}
+
+fn printSimpleFailureHuman(command: []const u8, err: anyerror) void {
+    std.debug.print("{s} failed: {s}\n", .{ command, @errorName(err) });
+}
+
+fn printSimpleFailureJson(allocator: std.mem.Allocator, command: []const u8, err: anyerror) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var out_writer = out.writer(allocator);
+    var out_buffer: [512]u8 = undefined;
+    var out_adapter = out_writer.adaptToNewApi(&out_buffer);
+    const writer = &out_adapter.new_interface;
+
+    try writer.writeAll("{\"status\":\"failed\",\"command\":");
+    try std.json.Stringify.encodeJsonString(command, .{}, writer);
+    try writer.writeAll(",\"error\":");
+    try std.json.Stringify.encodeJsonString(@errorName(err), .{}, writer);
+    try writer.writeAll("}\n");
+    try writer.flush();
+    std.debug.print("{s}", .{out.items});
+}
+
+fn printValidateHuman(summary: *const KnxSummary) void {
+    std.debug.print("Validation passed\n", .{});
+    std.debug.print("Verify mode: {s}\n", .{@tagName(summary.validation.verify_mode)});
+    std.debug.print("Knx digest: {s}\n", .{summary.knx_digest_hex[0..]});
+    std.debug.print("Toolchain id: {s}\n", .{summary.toolchain_spec.id});
+    std.debug.print(
+        "Workspace entries/local/remote/mounts: {d}/{d}/{d}/{d}\n",
+        .{
+            summary.workspace_spec.entries.len,
+            countOptionalSlice(validator.LocalInputSpec, summary.workspace_spec.local_inputs),
+            countOptionalSlice(validator.RemoteInputSpec, summary.workspace_spec.remote_inputs),
+            countOptionalSlice(validator.WorkspaceMountSpec, summary.workspace_spec.mounts),
+        },
+    );
+    std.debug.print("Operators: {d}\n", .{summary.build_spec.ops.len});
+    std.debug.print("Outputs: {d}\n", .{summary.output_spec.entries.len});
+}
+
+fn printValidateJson(allocator: std.mem.Allocator, summary: *const KnxSummary) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var out_writer = out.writer(allocator);
+    var out_buffer: [2048]u8 = undefined;
+    var out_adapter = out_writer.adaptToNewApi(&out_buffer);
+    const writer = &out_adapter.new_interface;
+
+    try writer.writeAll("{\"status\":\"ok\",\"command\":\"validate\",\"verify_mode\":");
+    try std.json.Stringify.encodeJsonString(@tagName(summary.validation.verify_mode), .{}, writer);
+    try writer.writeAll(",\"knx_digest\":");
+    try std.json.Stringify.encodeJsonString(summary.knx_digest_hex[0..], .{}, writer);
+    try writer.writeAll(",\"toolchain_id\":");
+    try std.json.Stringify.encodeJsonString(summary.toolchain_spec.id, .{}, writer);
+    try writer.writeAll(",\"stats\":{\"workspace_entries\":");
+    try writer.print("{d}", .{summary.workspace_spec.entries.len});
+    try writer.writeAll(",\"local_inputs\":");
+    try writer.print("{d}", .{countOptionalSlice(validator.LocalInputSpec, summary.workspace_spec.local_inputs)});
+    try writer.writeAll(",\"remote_inputs\":");
+    try writer.print("{d}", .{countOptionalSlice(validator.RemoteInputSpec, summary.workspace_spec.remote_inputs)});
+    try writer.writeAll(",\"mounts\":");
+    try writer.print("{d}", .{countOptionalSlice(validator.WorkspaceMountSpec, summary.workspace_spec.mounts)});
+    try writer.writeAll(",\"operators\":");
+    try writer.print("{d}", .{summary.build_spec.ops.len});
+    try writer.writeAll(",\"outputs\":");
+    try writer.print("{d}", .{summary.output_spec.entries.len});
+    try writer.writeAll("}}\n");
+    try writer.flush();
+    std.debug.print("{s}", .{out.items});
+}
+
+fn printPlanHuman(summary: *const KnxSummary) void {
+    std.debug.print("Plan generated\n", .{});
+    std.debug.print("Verify mode: {s}\n", .{@tagName(summary.validation.verify_mode)});
+    std.debug.print("Knx digest: {s}\n", .{summary.knx_digest_hex[0..]});
+    std.debug.print("Operators ({d}):\n", .{summary.build_spec.ops.len});
+    for (summary.build_spec.ops, 0..) |op, idx| {
+        switch (op) {
+            .fs_copy => |copy| {
+                std.debug.print(" {d}. knx.fs.copy {s} -> {s}\n", .{ idx + 1, copy.from_path, copy.to_path });
+            },
+            .c_compile => |compile| {
+                std.debug.print(" {d}. knx.c.compile {s} -> {s} (flags:{d})\n", .{ idx + 1, compile.src_path, compile.out_path, compile.args.len });
+            },
+            .zig_link => |link| {
+                std.debug.print(" {d}. knx.zig.link objs:{d} -> {s} (flags:{d})\n", .{ idx + 1, link.object_paths.len, link.out_path, link.args.len });
+            },
+            .archive_pack => |pack| {
+                std.debug.print(" {d}. knx.archive.pack inputs:{d} -> {s} ({s})\n", .{ idx + 1, pack.input_paths.len, pack.out_path, @tagName(pack.format) });
+            },
+        }
+    }
+    std.debug.print("Publish outputs ({d}):\n", .{summary.output_spec.entries.len});
+    for (summary.output_spec.entries) |entry| {
+        const source = entry.source_path orelse entry.path;
+        const publish_as = entry.publish_as orelse entry.path;
+        std.debug.print(" - {s} => {s} (mode {o})\n", .{ source, publish_as, entry.mode });
+    }
+}
+
+fn printPlanJson(allocator: std.mem.Allocator, summary: *const KnxSummary) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var out_writer = out.writer(allocator);
+    var out_buffer: [8 * 1024]u8 = undefined;
+    var out_adapter = out_writer.adaptToNewApi(&out_buffer);
+    const writer = &out_adapter.new_interface;
+
+    try writer.writeAll("{\"status\":\"ok\",\"command\":\"plan\",\"verify_mode\":");
+    try std.json.Stringify.encodeJsonString(@tagName(summary.validation.verify_mode), .{}, writer);
+    try writer.writeAll(",\"knx_digest\":");
+    try std.json.Stringify.encodeJsonString(summary.knx_digest_hex[0..], .{}, writer);
+    try writer.writeAll(",\"operators\":[");
+    for (summary.build_spec.ops, 0..) |op, idx| {
+        if (idx != 0) try writer.writeAll(",");
+        switch (op) {
+            .fs_copy => |copy| {
+                try writer.writeAll("{\"run\":\"knx.fs.copy\",\"inputs\":[");
+                try std.json.Stringify.encodeJsonString(copy.from_path, .{}, writer);
+                try writer.writeAll("],\"outputs\":[");
+                try std.json.Stringify.encodeJsonString(copy.to_path, .{}, writer);
+                try writer.writeAll("]}");
+            },
+            .c_compile => |compile| {
+                try writer.writeAll("{\"run\":\"knx.c.compile\",\"inputs\":[");
+                try std.json.Stringify.encodeJsonString(compile.src_path, .{}, writer);
+                try writer.writeAll("],\"outputs\":[");
+                try std.json.Stringify.encodeJsonString(compile.out_path, .{}, writer);
+                try writer.writeAll("],\"flags\":[");
+                for (compile.args, 0..) |arg, i| {
+                    if (i != 0) try writer.writeAll(",");
+                    try std.json.Stringify.encodeJsonString(arg, .{}, writer);
+                }
+                try writer.writeAll("]}");
+            },
+            .zig_link => |link| {
+                try writer.writeAll("{\"run\":\"knx.zig.link\",\"inputs\":[");
+                for (link.object_paths, 0..) |obj, i| {
+                    if (i != 0) try writer.writeAll(",");
+                    try std.json.Stringify.encodeJsonString(obj, .{}, writer);
+                }
+                try writer.writeAll("],\"outputs\":[");
+                try std.json.Stringify.encodeJsonString(link.out_path, .{}, writer);
+                try writer.writeAll("],\"flags\":[");
+                for (link.args, 0..) |arg, i| {
+                    if (i != 0) try writer.writeAll(",");
+                    try std.json.Stringify.encodeJsonString(arg, .{}, writer);
+                }
+                try writer.writeAll("]}");
+            },
+            .archive_pack => |pack| {
+                try writer.writeAll("{\"run\":\"knx.archive.pack\",\"inputs\":[");
+                for (pack.input_paths, 0..) |in_path, i| {
+                    if (i != 0) try writer.writeAll(",");
+                    try std.json.Stringify.encodeJsonString(in_path, .{}, writer);
+                }
+                try writer.writeAll("],\"outputs\":[");
+                try std.json.Stringify.encodeJsonString(pack.out_path, .{}, writer);
+                try writer.writeAll("],\"format\":");
+                try std.json.Stringify.encodeJsonString(@tagName(pack.format), .{}, writer);
+                try writer.writeAll("}");
+            },
+        }
+    }
+    try writer.writeAll("],\"outputs\":[");
+    for (summary.output_spec.entries, 0..) |entry, idx| {
+        if (idx != 0) try writer.writeAll(",");
+        const source = entry.source_path orelse entry.path;
+        const publish_as = entry.publish_as orelse entry.path;
+        try writer.writeAll("{\"source\":");
+        try std.json.Stringify.encodeJsonString(source, .{}, writer);
+        try writer.writeAll(",\"publish_as\":");
+        try std.json.Stringify.encodeJsonString(publish_as, .{}, writer);
+        try writer.writeAll(",\"mode\":");
+        try writer.print("{d}", .{entry.mode});
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]}\n");
+    try writer.flush();
+    std.debug.print("{s}", .{out.items});
 }
 
 fn printSuccessHuman(allocator: std.mem.Allocator, run_result: *const bootstrap.RunResult, cli: *const BootstrapCliArgs) void {
@@ -482,6 +908,45 @@ test "parseBootstrapCliArgs applies defaults and optional overrides" {
     try std.testing.expectEqualStrings("custom-trust", custom.trust_dir.?);
     try std.testing.expectEqualStrings("cache-dir", custom.cache_root);
     try std.testing.expectEqualStrings("out-dir", custom.output_root);
+}
+
+test "parseBootstrapCliArgs accepts --knxfile option" {
+    const parsed = try parseBootstrapCliArgs(&.{
+        "--knxfile",
+        "Knxfile.prod",
+        "--json",
+    });
+    try std.testing.expectEqualStrings("Knxfile.prod", parsed.path);
+    try std.testing.expect(parsed.json_output);
+}
+
+test "parseParseOnlyCliArgs parses positional and named forms" {
+    const positional = try parseParseOnlyCliArgs(&.{"Knxfile.plan"});
+    try std.testing.expectEqualStrings("Knxfile.plan", positional.path);
+    try std.testing.expect(!positional.json_output);
+
+    const named = try parseParseOnlyCliArgs(&.{
+        "--knxfile",
+        "Knxfile.validate",
+        "--json",
+    });
+    try std.testing.expectEqualStrings("Knxfile.validate", named.path);
+    try std.testing.expect(named.json_output);
+}
+
+test "selectCommand supports knx prefix and defaults" {
+    const prefixed = try selectCommand(&.{ "knx", "build", "Knxfile" });
+    try std.testing.expectEqual(CliCommand.build, prefixed.command);
+    try std.testing.expectEqual(@as(usize, 1), prefixed.args.len);
+    try std.testing.expectEqualStrings("Knxfile", prefixed.args[0]);
+
+    const validate_cmd = try selectCommand(&.{ "validate", "Knxfile" });
+    try std.testing.expectEqual(CliCommand.validate, validate_cmd.command);
+    try std.testing.expectEqual(@as(usize, 1), validate_cmd.args.len);
+
+    const default_build = try selectCommand(&.{"Knxfile"});
+    try std.testing.expectEqual(CliCommand.build, default_build.command);
+    try std.testing.expectEqual(@as(usize, 1), default_build.args.len);
 }
 
 test "parseBootstrapCliArgs rejects too many positional arguments" {
