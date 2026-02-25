@@ -190,6 +190,11 @@ fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options:
         return err;
     };
     defer build_spec.deinit(allocator);
+    validator.validateBuildWriteIsolation(&workspace_spec, &build_spec) catch |err| {
+        failed_at.* = .parse_knxfile;
+        push(&trace, allocator, .failed) catch {};
+        return parse_errors.normalize(err);
+    };
     var output_spec = validator.parseOutputSpecStrict(allocator, parsed.canonical_json) catch |err| {
         failed_at.* = .parse_knxfile;
         push(&trace, allocator, .failed) catch {};
@@ -579,6 +584,57 @@ test "attemptRunWithOptions returns structured parse error" {
             try std.testing.expectEqual(State.parse_knxfile, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_PARSE_SYNTAX, failure.code);
             try std.testing.expectEqual(error.Syntax, failure.cause);
+        },
+    }
+}
+
+test "attemptRunWithOptions rejects build writes into mounted input path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "inputs": [
+        \\    { "path": "src/main.c", "source": "project/src/main.c" }
+        \\  ],
+        \\  "build": [
+        \\    { "op": "knx.fs.copy", "from": "src/main.c", "to": "src/main.c" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    const attempt = attemptRunWithOptions(allocator, source, .{
+        .trust_metadata_dir = null,
+        .trust_state_path = null,
+    });
+
+    switch (attempt) {
+        .success => |*result| {
+            defer result.deinit(allocator);
+            return error.ExpectedFailure;
+        },
+        .failure => |failure| {
+            try std.testing.expectEqual(State.parse_knxfile, failure.at);
+            try std.testing.expectEqual(kx_error.Code.KX_PARSE_VALUE_INVALID, failure.code);
+            try std.testing.expectEqual(error.ValueInvalid, failure.cause);
         },
     }
 }

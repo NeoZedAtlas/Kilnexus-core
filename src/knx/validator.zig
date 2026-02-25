@@ -487,6 +487,20 @@ pub fn parseBuildSpecStrict(allocator: std.mem.Allocator, canonical_json: []cons
     return parseBuildSpec(allocator, canonical_json) catch |err| return parse_errors.normalize(err);
 }
 
+pub fn validateBuildWriteIsolation(workspace_spec: *const WorkspaceSpec, build_spec: *const BuildSpec) !void {
+    for (build_spec.ops) |op| {
+        const write_path = switch (op) {
+            .fs_copy => |copy| copy.to_path,
+            .c_compile => |compile| compile.out_path,
+            .zig_link => |link| link.out_path,
+            .archive_pack => |pack| pack.out_path,
+        };
+        for (workspace_spec.entries) |entry| {
+            if (isEqualOrDescendant(write_path, entry.mount_path)) return error.ValueInvalid;
+        }
+    }
+}
+
 pub fn computeKnxDigestHex(canonical_json: []const u8) [64]u8 {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(canonical_json, &digest, .{});
@@ -693,6 +707,13 @@ fn validateWorkspaceRelativePath(path: []const u8) !void {
             return error.ValueInvalid;
         }
     }
+}
+
+fn isEqualOrDescendant(path: []const u8, base: []const u8) bool {
+    if (std.mem.eql(u8, path, base)) return true;
+    if (path.len <= base.len) return false;
+    if (!std.mem.startsWith(u8, path, base)) return false;
+    return path[base.len] == '/';
 }
 
 fn expectAsciiDigits(value: []const u8, field: []const u8) !void {
@@ -1274,4 +1295,54 @@ test "parseBuildSpec parses archive.pack tar.gz format" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "validateBuildWriteIsolation rejects write into mounted input path" {
+    const allocator = std.testing.allocator;
+
+    var workspace_entries = try allocator.alloc(WorkspaceEntry, 1);
+    workspace_entries[0] = .{
+        .mount_path = try allocator.dupe(u8, "src/main.c"),
+        .host_source = try allocator.dupe(u8, "project/src/main.c"),
+    };
+    var workspace_spec: WorkspaceSpec = .{ .entries = workspace_entries };
+    defer workspace_spec.deinit(allocator);
+
+    var build_ops = try allocator.alloc(BuildOp, 1);
+    build_ops[0] = .{
+        .c_compile = .{
+            .src_path = try allocator.dupe(u8, "src/main.c"),
+            .out_path = try allocator.dupe(u8, "src/main.c"),
+            .args = try allocator.alloc([]u8, 0),
+        },
+    };
+    var build_spec: BuildSpec = .{ .ops = build_ops };
+    defer build_spec.deinit(allocator);
+
+    try std.testing.expectError(error.ValueInvalid, validateBuildWriteIsolation(&workspace_spec, &build_spec));
+}
+
+test "validateBuildWriteIsolation allows write outside mounted input paths" {
+    const allocator = std.testing.allocator;
+
+    var workspace_entries = try allocator.alloc(WorkspaceEntry, 1);
+    workspace_entries[0] = .{
+        .mount_path = try allocator.dupe(u8, "src/main.c"),
+        .host_source = try allocator.dupe(u8, "project/src/main.c"),
+    };
+    var workspace_spec: WorkspaceSpec = .{ .entries = workspace_entries };
+    defer workspace_spec.deinit(allocator);
+
+    var build_ops = try allocator.alloc(BuildOp, 1);
+    build_ops[0] = .{
+        .c_compile = .{
+            .src_path = try allocator.dupe(u8, "src/main.c"),
+            .out_path = try allocator.dupe(u8, "obj/main.o"),
+            .args = try allocator.alloc([]u8, 0),
+        },
+    };
+    var build_spec: BuildSpec = .{ .ops = build_ops };
+    defer build_spec.deinit(allocator);
+
+    try validateBuildWriteIsolation(&workspace_spec, &build_spec);
 }
