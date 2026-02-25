@@ -84,6 +84,8 @@ test "parseLockfileStrict rejects empty input" {
 test "parseLockfile parses TOML into canonical JSON" {
     const allocator = std.testing.allocator;
     const source =
+        \\#!knxfile
+        \\
         \\version = 1
         \\target = "x86_64-unknown-linux-musl"
         \\
@@ -99,4 +101,13 @@ test "parseLockfile parses TOML into canonical JSON" {
         "{\"policy\":{\"clock\":\"fixed\",\"network\":\"off\",\"verify_mode\":\"strict\"},\"target\":\"x86_64-unknown-linux-musl\",\"version\":1}",
         parsed.canonical_json,
     );
+}
+
+test "parseLockfile rejects TOML without knx magic header" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\version = 1
+        \\target = "x86_64-unknown-linux-musl"
+    ;
+    try std.testing.expectError(error.Parse, parseLockfile(allocator, source));
 }

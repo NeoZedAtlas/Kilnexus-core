@@ -1,5 +1,7 @@
 import std/[algorithm, json, strutils]
 
+const knxMagicHeader = "#!knxfile"
+
 type
   KxErr* {.size: sizeof(cint).} = enum
     KX_OK = 0
@@ -278,6 +280,33 @@ proc parseTomlDocument(input: string): JsonNode =
     let assignment = parseAssignmentLine(line)
     current[assignment.key] = assignment.value
 
+proc stripUtf8Bom(text: string): string =
+  if text.len >= 3 and
+     text[0] == char(0xEF) and
+     text[1] == char(0xBB) and
+     text[2] == char(0xBF):
+    return text[3..^1]
+  return text
+
+proc stripKnxMagicHeader(text: string): string =
+  var saw_header = false
+  var body_lines: seq[string] = @[]
+
+  for raw_line in text.splitLines():
+    let trimmed = raw_line.strip
+    if not saw_header:
+      if trimmed.len == 0:
+        continue
+      if trimmed != knxMagicHeader:
+        raise newException(ValueError, "missing knx magic header")
+      saw_header = true
+      continue
+    body_lines.add(raw_line)
+
+  if not saw_header:
+    raise newException(ValueError, "missing knx magic header")
+  return body_lines.join("\n")
+
 proc canonicalizeJson(node: JsonNode): JsonNode =
   case node.kind
   of JObject:
@@ -296,7 +325,8 @@ proc canonicalizeJson(node: JsonNode): JsonNode =
     result = node
 
 proc parseAndCanonicalize(input_text: string): string =
-  let trimmed = input_text.strip
+  let source = stripUtf8Bom(input_text)
+  let trimmed = source.strip
   if trimmed.len == 0:
     raise newException(ValueError, "empty input")
 
@@ -304,7 +334,7 @@ proc parseAndCanonicalize(input_text: string): string =
     if trimmed[0] == '{' and trimmed[^1] == '}':
       parseJson(trimmed)
     else:
-      parseTomlDocument(trimmed)
+      parseTomlDocument(stripKnxMagicHeader(source))
   let canonical = canonicalizeJson(parsed)
   return $canonical
 

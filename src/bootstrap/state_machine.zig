@@ -557,6 +557,8 @@ test "run supports TOML operators DAG with local inputs and source/publish_as ou
 
     const source = try std.fmt.allocPrint(
         allocator,
+        \\#!knxfile
+        \\
         \\version = 1
         \\target = "x86_64-unknown-linux-musl"
         \\
@@ -689,6 +691,8 @@ test "run supports TOML remote input extraction and mount projection" {
 
     const source = try std.fmt.allocPrint(
         allocator,
+        \\#!knxfile
+        \\
         \\version = 1
         \\target = "x86_64-unknown-linux-musl"
         \\
@@ -767,7 +771,7 @@ test "run supports TOML remote input extraction and mount projection" {
 
 test "run fails on malformed lockfile" {
     const allocator = std.testing.allocator;
-    const source = "version=1";
+    const source = "#!knxfile\nversion=1";
 
     try std.testing.expectError(error.MissingField, run(allocator, source));
 }
@@ -804,7 +808,7 @@ test "run fails on policy violation" {
 
 test "attemptRunWithOptions returns structured parse error" {
     const allocator = std.testing.allocator;
-    const source = "version=1";
+    const source = "#!knxfile\nversion=1";
 
     const attempt = attemptRunWithOptions(allocator, source, .{
         .trust_metadata_dir = null,
