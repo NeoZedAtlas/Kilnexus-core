@@ -485,12 +485,6 @@ test "run completes bootstrap happy path" {
     try std.testing.expectEqual(@as(usize, 64), result.knx_digest_hex.len);
     try std.testing.expect(result.workspace_cwd.len > 0);
 
-    const published = try std.fs.path.join(allocator, &.{ output_root, "app" });
-    defer allocator.free(published);
-    const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
-    defer allocator.free(bytes);
-    try std.testing.expectEqualStrings("artifact\n", bytes);
-
     const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
     defer allocator.free(pointer_path);
     const pointer_raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 2048);
@@ -505,7 +499,17 @@ test "run completes bootstrap happy path" {
         .string => |text| text,
         else => return error.TestUnexpectedResult,
     };
+    const pointer_release = switch (pointer_obj.get("release_rel") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
     try std.testing.expectEqualStrings(result.knx_digest_hex[0..], pointer_knx);
+
+    const published = try std.fs.path.join(allocator, &.{ output_root, pointer_release, "app" });
+    defer allocator.free(published);
+    const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("artifact\n", bytes);
 }
 
 test "run fails on malformed lockfile" {
@@ -908,7 +912,22 @@ test "run publishes archive.pack output from workspace inputs" {
 
     try std.testing.expectEqual(State.done, result.final_state);
 
-    const archive_path = try std.fs.path.join(allocator, &.{ output_root, "objects.tar" });
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer_raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 2048);
+    defer allocator.free(pointer_raw);
+    const pointer_doc = try std.json.parseFromSlice(std.json.Value, allocator, pointer_raw, .{});
+    defer pointer_doc.deinit();
+    const pointer_obj = switch (pointer_doc.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const pointer_release = switch (pointer_obj.get("release_rel") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const archive_path = try std.fs.path.join(allocator, &.{ output_root, pointer_release, "objects.tar" });
     defer allocator.free(archive_path);
     var archive_file = try std.fs.cwd().openFile(archive_path, .{});
     defer archive_file.close();
@@ -1005,7 +1024,22 @@ test "run publishes archive.pack tar.gz output from workspace inputs" {
 
     try std.testing.expectEqual(State.done, result.final_state);
 
-    const archive_path = try std.fs.path.join(allocator, &.{ output_root, "objects.tar.gz" });
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer_raw = try std.fs.cwd().readFileAlloc(allocator, pointer_path, 2048);
+    defer allocator.free(pointer_raw);
+    const pointer_doc = try std.json.parseFromSlice(std.json.Value, allocator, pointer_raw, .{});
+    defer pointer_doc.deinit();
+    const pointer_obj = switch (pointer_doc.value) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const pointer_release = switch (pointer_obj.get("release_rel") orelse return error.TestUnexpectedResult) {
+        .string => |text| text,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const archive_path = try std.fs.path.join(allocator, &.{ output_root, pointer_release, "objects.tar.gz" });
     defer allocator.free(archive_path);
     var archive_file = try std.fs.cwd().openFile(archive_path, .{});
     defer archive_file.close();

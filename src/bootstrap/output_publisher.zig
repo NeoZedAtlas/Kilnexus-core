@@ -37,16 +37,20 @@ pub fn atomicPublish(
     build_id: []const u8,
     options: PublishOptions,
 ) !void {
-    const stage_root = try std.fmt.allocPrint(allocator, "{s}.staging-{s}", .{
-        options.output_root,
-        build_id,
-    });
+    const release_parent = try std.fs.path.join(allocator, &.{ options.output_root, "releases" });
+    defer allocator.free(release_parent);
+    const release_root = try std.fs.path.join(allocator, &.{ release_parent, build_id });
+    defer allocator.free(release_root);
+    const stage_root = try std.fmt.allocPrint(allocator, "{s}.staging", .{release_root});
     defer allocator.free(stage_root);
+    const release_rel = try std.fmt.allocPrint(allocator, "releases/{s}", .{build_id});
+    defer allocator.free(release_rel);
 
+    try std.fs.cwd().makePath(release_parent);
     try deletePathIfExists(stage_root);
     errdefer deletePathIfExists(stage_root) catch {};
 
-    if (try pathExists(options.output_root)) return error.AtomicRenameFailed;
+    if (try pathExists(release_root)) return error.AtomicRenameFailed;
 
     for (output_spec.entries) |entry| {
         const rel = try outputRelativePath(entry.path);
@@ -81,7 +85,7 @@ pub fn atomicPublish(
         }
     }
 
-    std.fs.cwd().rename(stage_root, options.output_root) catch |err| switch (err) {
+    std.fs.cwd().rename(stage_root, release_root) catch |err| switch (err) {
         error.PathAlreadyExists,
         error.AccessDenied,
         error.PermissionDenied,
@@ -90,13 +94,9 @@ pub fn atomicPublish(
         else => return err,
     };
 
-    if (std.fs.path.dirname(options.output_root)) |parent| {
-        try syncDirPath(parent);
-    } else {
-        try syncDirPath(".");
-    }
-
-    try writeCurrentPointer(allocator, options.output_root, build_id, options.knx_digest_hex);
+    try syncDirPath(release_parent);
+    try syncDirPath(options.output_root);
+    try writeCurrentPointer(allocator, options.output_root, build_id, release_rel, options.knx_digest_hex);
 }
 
 fn outputRelativePath(path: []const u8) ![]const u8 {
@@ -146,6 +146,7 @@ fn writeCurrentPointer(
     allocator: std.mem.Allocator,
     output_root: []const u8,
     build_id: []const u8,
+    release_rel: []const u8,
     knx_digest_hex: ?[]const u8,
 ) !void {
     const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
@@ -161,8 +162,10 @@ fn writeCurrentPointer(
 
     var writer = &atomic_file.file_writer.interface;
     const published_at_unix_ms = std.time.milliTimestamp();
-    try writer.writeAll("{\"version\":1,\"build_id\":");
+    try writer.writeAll("{\"version\":2,\"build_id\":");
     try std.json.Stringify.encodeJsonString(build_id, .{}, writer);
+    try writer.writeAll(",\"release_rel\":");
+    try std.json.Stringify.encodeJsonString(release_rel, .{}, writer);
     if (knx_digest_hex) |digest| {
         try writer.writeAll(",\"knx_digest\":");
         try std.json.Stringify.encodeJsonString(digest, .{}, writer);
@@ -221,7 +224,7 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
         .output_root = output_root,
     });
 
-    const published = try std.fs.path.join(allocator, &.{ output_root, "app" });
+    const published = try std.fs.path.join(allocator, &.{ output_root, "releases", "build-test", "app" });
     defer allocator.free(published);
     const bytes = try std.fs.cwd().readFileAlloc(allocator, published, 1024);
     defer allocator.free(bytes);
@@ -241,6 +244,11 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
         .string => |str| try std.testing.expectEqualStrings("build-test", str),
         else => return error.TestUnexpectedResult,
     }
+    const release_rel_val = root.get("release_rel") orelse return error.TestUnexpectedResult;
+    switch (release_rel_val) {
+        .string => |str| try std.testing.expectEqualStrings("releases/build-test", str),
+        else => return error.TestUnexpectedResult,
+    }
 
     if (std.fs.has_executable_bit) {
         var published_file = try std.fs.cwd().openFile(published, .{});
@@ -250,7 +258,7 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
     }
 }
 
-test "atomicPublish fails when output root already exists" {
+test "atomicPublish fails when release id already exists" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -260,7 +268,7 @@ test "atomicPublish fails when output root already exists" {
         .sub_path = "workspace/kilnexus-out/app",
         .data = "artifact\n",
     });
-    try tmp.dir.makePath("published/kilnexus-out");
+    try tmp.dir.makePath("published/kilnexus-out/releases/build-test");
 
     const workspace_cwd = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/workspace", .{tmp.sub_path[0..]});
     defer allocator.free(workspace_cwd);
@@ -307,4 +315,43 @@ test "verifyWorkspaceOutputs fails on sha256 mismatch" {
     defer spec.deinit(allocator);
 
     try std.testing.expectError(error.OutputHashMismatch, verifyWorkspaceOutputs(allocator, workspace_cwd, &spec));
+}
+
+test "atomicPublish allows multiple builds under releases namespace" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("workspace/kilnexus-out");
+    try tmp.dir.writeFile(.{
+        .sub_path = "workspace/kilnexus-out/app",
+        .data = "artifact\n",
+    });
+
+    const workspace_cwd = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/workspace", .{tmp.sub_path[0..]});
+    defer allocator.free(workspace_cwd);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/published/kilnexus-out", .{tmp.sub_path[0..]});
+    defer allocator.free(output_root);
+
+    var entries = try allocator.alloc(validator.OutputEntry, 1);
+    entries[0] = .{
+        .path = try allocator.dupe(u8, "kilnexus-out/app"),
+        .mode = 0o755,
+    };
+    var spec: validator.OutputSpec = .{ .entries = entries };
+    defer spec.deinit(allocator);
+
+    try atomicPublish(allocator, workspace_cwd, &spec, "build-a", .{
+        .output_root = output_root,
+    });
+    try atomicPublish(allocator, workspace_cwd, &spec, "build-b", .{
+        .output_root = output_root,
+    });
+
+    const a_path = try std.fs.path.join(allocator, &.{ output_root, "releases", "build-a", "app" });
+    defer allocator.free(a_path);
+    const b_path = try std.fs.path.join(allocator, &.{ output_root, "releases", "build-b", "app" });
+    defer allocator.free(b_path);
+    try std.testing.expect(try pathExists(a_path));
+    try std.testing.expect(try pathExists(b_path));
 }
