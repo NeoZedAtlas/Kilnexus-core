@@ -1,15 +1,8 @@
 const std = @import("std");
-const abi_parser = @import("../parser/abi_parser.zig");
-const parse_errors = @import("../parser/parse_errors.zig");
-const validator = @import("../knx/validator.zig");
-const mini_tuf = @import("../trust/mini_tuf.zig");
 const kx_error = @import("../errors/kx_error.zig");
 const state_types = @import("state/types.zig");
 const state_errors = @import("state/errors.zig");
-const toolchain_installer = @import("toolchain_installer.zig");
-const workspace_projector = @import("workspace_projector.zig");
-const build_executor = @import("build_executor.zig");
-const output_publisher = @import("output_publisher.zig");
+const state_runner = @import("state/runner.zig");
 
 pub const State = state_types.State;
 pub const RunResult = state_types.RunResult;
@@ -60,11 +53,11 @@ pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const
 pub fn attemptRunWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) RunAttempt {
     var failed_at: State = .init;
     const result = runWithOptionsCore(allocator, source, options, &failed_at) catch |err| {
-        const cause = normalizeCauseByState(failed_at, err);
+        const cause = state_errors.normalizeCauseByState(failed_at, err);
         return .{
             .failure = .{
                 .at = failed_at,
-                .code = classifyByState(failed_at, cause),
+                .code = state_errors.classifyByState(failed_at, cause),
                 .cause = cause,
             },
         };
@@ -73,239 +66,7 @@ pub fn attemptRunWithOptions(allocator: std.mem.Allocator, source: []const u8, o
 }
 
 fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, options: RunOptions, failed_at: *State) !RunResult {
-    var trace: std.ArrayList(State) = .empty;
-    errdefer trace.deinit(allocator);
-    failed_at.* = .init;
-
-    try push(&trace, allocator, .init);
-    try push(&trace, allocator, .load_trust_metadata);
-    var trust_summary: mini_tuf.VerificationSummary = .{
-        .root_version = 0,
-        .timestamp_version = 0,
-        .snapshot_version = 0,
-        .targets_version = 0,
-    };
-    if (options.trust_metadata_dir) |trust_dir_path| {
-        var bundle = mini_tuf.loadFromDirStrict(allocator, trust_dir_path) catch |err| {
-            failed_at.* = .load_trust_metadata;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-        defer bundle.deinit(allocator);
-
-        try push(&trace, allocator, .verify_metadata_chain);
-        trust_summary = mini_tuf.verifyStrict(allocator, &bundle, .{
-            .state_path = options.trust_state_path,
-        }) catch |err| {
-            failed_at.* = .verify_metadata_chain;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    } else {
-        try push(&trace, allocator, .verify_metadata_chain);
-    }
-    try push(&trace, allocator, .parse_knxfile);
-
-    const parsed = abi_parser.parseLockfileStrict(allocator, source) catch |err| {
-        failed_at.* = .parse_knxfile;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    errdefer allocator.free(parsed.canonical_json);
-    const validation = validator.validateCanonicalJsonStrict(allocator, parsed.canonical_json) catch |err| {
-        failed_at.* = .parse_knxfile;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    var toolchain_spec = validator.parseToolchainSpecStrict(allocator, parsed.canonical_json) catch |err| {
-        failed_at.* = .parse_knxfile;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    defer toolchain_spec.deinit(allocator);
-    const tree_hex = std.fmt.bytesToHex(toolchain_spec.tree_root, .lower);
-    const toolchain_tree_path = try std.fs.path.join(allocator, &.{
-        options.cache_root,
-        "cas",
-        "official",
-        "tree",
-        tree_hex[0..],
-    });
-    defer allocator.free(toolchain_tree_path);
-    var workspace_spec = validator.parseWorkspaceSpecStrict(allocator, parsed.canonical_json) catch |err| {
-        failed_at.* = .parse_knxfile;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    defer workspace_spec.deinit(allocator);
-    var build_spec = validator.parseBuildSpecStrict(allocator, parsed.canonical_json) catch |err| {
-        failed_at.* = .parse_knxfile;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    defer build_spec.deinit(allocator);
-    validator.validateBuildWriteIsolation(&workspace_spec, &build_spec) catch |err| {
-        failed_at.* = .parse_knxfile;
-        push(&trace, allocator, .failed) catch {};
-        return parse_errors.normalize(err);
-    };
-    var output_spec = validator.parseOutputSpecStrict(allocator, parsed.canonical_json) catch |err| {
-        failed_at.* = .parse_knxfile;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    defer output_spec.deinit(allocator);
-    const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
-
-    var install_session: ?toolchain_installer.InstallSession = null;
-    if (toolchain_spec.source != null) {
-        install_session = toolchain_installer.InstallSession.init(allocator, &toolchain_spec, .{
-            .cache_root = options.cache_root,
-            .verify_mode = validation.verify_mode,
-        }) catch |err| {
-            failed_at.* = .resolve_toolchain;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-    defer if (install_session) |*session| session.deinit();
-
-    try push(&trace, allocator, .resolve_toolchain);
-    if (install_session) |*session| {
-        session.resolveToolchain() catch |err| {
-            failed_at.* = .resolve_toolchain;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-
-    try push(&trace, allocator, .download_blob);
-    if (install_session) |*session| {
-        session.downloadBlob() catch |err| {
-            failed_at.* = .download_blob;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-
-    try push(&trace, allocator, .verify_blob);
-    if (install_session) |*session| {
-        session.verifyBlob() catch |err| {
-            failed_at.* = .verify_blob;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-
-    try push(&trace, allocator, .unpack_staging);
-    if (install_session) |*session| {
-        session.unpackStaging() catch |err| {
-            failed_at.* = .unpack_staging;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-
-    try push(&trace, allocator, .compute_tree_root);
-    if (install_session) |*session| {
-        session.computeTreeRoot() catch |err| {
-            failed_at.* = .compute_tree_root;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-
-    try push(&trace, allocator, .verify_tree_root);
-    if (install_session) |*session| {
-        session.verifyTreeRoot() catch |err| {
-            failed_at.* = .verify_tree_root;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-
-    try push(&trace, allocator, .seal_cache_object);
-    if (install_session) |*session| {
-        session.sealCacheObject() catch |err| {
-            failed_at.* = .seal_cache_object;
-            push(&trace, allocator, .failed) catch {};
-            return err;
-        };
-    }
-
-    try push(&trace, allocator, .execute_build_graph);
-    var workspace_plan = workspace_projector.planWorkspace(allocator, &workspace_spec, .{
-        .cache_root = options.cache_root,
-    }) catch |err| {
-        failed_at.* = .execute_build_graph;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    defer workspace_plan.deinit(allocator);
-    const build_id = try std.fmt.allocPrint(
-        allocator,
-        "{s}-{d}",
-        .{ knx_digest_hex[0..16], std.time.microTimestamp() },
-    );
-    defer allocator.free(build_id);
-    const workspace_cwd = workspace_projector.projectWorkspace(allocator, &workspace_plan, build_id, .{
-        .cache_root = options.cache_root,
-    }) catch |err| {
-        failed_at.* = .execute_build_graph;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-    errdefer allocator.free(workspace_cwd);
-    build_executor.executeBuildGraph(allocator, workspace_cwd, &build_spec, .{
-        .toolchain_root = toolchain_tree_path,
-    }) catch |err| {
-        failed_at.* = .execute_build_graph;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-
-    try push(&trace, allocator, .verify_outputs);
-    output_publisher.verifyWorkspaceOutputs(allocator, workspace_cwd, &output_spec) catch |err| {
-        failed_at.* = .verify_outputs;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-
-    try push(&trace, allocator, .atomic_publish);
-    output_publisher.atomicPublish(allocator, workspace_cwd, &output_spec, build_id, .{
-        .output_root = options.output_root,
-        .knx_digest_hex = knx_digest_hex[0..],
-        .verify_mode = @tagName(validation.verify_mode),
-        .toolchain_tree_root_hex = tree_hex[0..],
-    }) catch |err| {
-        failed_at.* = .atomic_publish;
-        push(&trace, allocator, .failed) catch {};
-        return err;
-    };
-
-    try push(&trace, allocator, .done);
-
-    return .{
-        .trace = trace,
-        .canonical_json = parsed.canonical_json,
-        .workspace_cwd = workspace_cwd,
-        .verify_mode = validation.verify_mode,
-        .knx_digest_hex = knx_digest_hex,
-        .trust = trust_summary,
-        .final_state = .done,
-    };
-}
-
-fn classifyByState(state: State, err: anyerror) kx_error.Code {
-    return state_errors.classifyByState(state, err);
-}
-
-fn normalizeCauseByState(state: State, err: anyerror) anyerror {
-    return state_errors.normalizeCauseByState(state, err);
-}
-
-fn push(trace: *std.ArrayList(State), allocator: std.mem.Allocator, state: State) !void {
-    try trace.append(allocator, state);
+    return state_runner.runWithOptionsCore(allocator, source, options, failed_at);
 }
 
 test "run completes bootstrap happy path" {
@@ -378,7 +139,7 @@ test "run completes bootstrap happy path" {
     try std.testing.expectEqual(@as(usize, 15), result.trace.items.len);
     try std.testing.expectEqual(State.parse_knxfile, result.trace.items[3]);
     try std.testing.expectEqual(State.done, result.trace.items[result.trace.items.len - 1]);
-    try std.testing.expectEqual(validator.VerifyMode.strict, result.verify_mode);
+    try std.testing.expectEqual(@as(@TypeOf(result.verify_mode), .strict), result.verify_mode);
     try std.testing.expectEqual(@as(usize, 64), result.knx_digest_hex.len);
     try std.testing.expect(result.workspace_cwd.len > 0);
 
@@ -673,7 +434,7 @@ test "run supports TOML remote input extraction and mount projection" {
     });
     const expected_tree_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/expected", .{tmp.sub_path[0..]});
     defer allocator.free(expected_tree_rel);
-    const remote_tree_hex = try workspace_projector.computeTreeRootHexForDir(allocator, expected_tree_rel);
+    const remote_tree_hex = try @import("workspace_projector.zig").computeTreeRootHexForDir(allocator, expected_tree_rel);
 
     const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
     defer allocator.free(cache_root);
@@ -889,12 +650,12 @@ test "attemptRunWithOptions maps integrity failure by error kind" {
     const allocator = std.testing.allocator;
     const source = "{}";
 
-    const mapped = classifyByState(.verify_blob, normalizeCauseByState(.verify_blob, error.BlobHashMismatch));
+    const mapped = state_errors.classifyByState(.verify_blob, state_errors.normalizeCauseByState(.verify_blob, error.BlobHashMismatch));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_BLOB_MISMATCH, mapped);
 
-    const mapped_tree = classifyByState(.verify_tree_root, normalizeCauseByState(.verify_tree_root, error.PathTraversalDetected));
+    const mapped_tree = state_errors.classifyByState(.verify_tree_root, state_errors.normalizeCauseByState(.verify_tree_root, error.PathTraversalDetected));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped_tree);
-    const mapped_resolve_tree = classifyByState(.resolve_toolchain, normalizeCauseByState(.resolve_toolchain, error.TreeRootMismatch));
+    const mapped_resolve_tree = state_errors.classifyByState(.resolve_toolchain, state_errors.normalizeCauseByState(.resolve_toolchain, error.TreeRootMismatch));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_TREE_MISMATCH, mapped_resolve_tree);
 
     _ = source;
@@ -902,14 +663,14 @@ test "attemptRunWithOptions maps integrity failure by error kind" {
 }
 
 test "attemptRunWithOptions maps publish failure by error kind" {
-    const mapped = classifyByState(.atomic_publish, normalizeCauseByState(.atomic_publish, error.FsyncFailed));
+    const mapped = state_errors.classifyByState(.atomic_publish, state_errors.normalizeCauseByState(.atomic_publish, error.FsyncFailed));
     try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped);
-    const hash_mapped = classifyByState(.verify_outputs, normalizeCauseByState(.verify_outputs, error.OutputHashMismatch));
+    const hash_mapped = state_errors.classifyByState(.verify_outputs, state_errors.normalizeCauseByState(.verify_outputs, error.OutputHashMismatch));
     try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_OUTPUT_HASH_MISMATCH, hash_mapped);
 }
 
 test "attemptRunWithOptions maps unpack traversal as integrity error" {
-    const mapped = classifyByState(.unpack_staging, normalizeCauseByState(.unpack_staging, error.PathTraversalDetected));
+    const mapped = state_errors.classifyByState(.unpack_staging, state_errors.normalizeCauseByState(.unpack_staging, error.PathTraversalDetected));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped);
 }
 
