@@ -7,6 +7,7 @@ const tree_hash = @import("tree_hash.zig");
 const common = @import("planner/common.zig");
 const local_mounts = @import("planner/local_mounts.zig");
 const remote_mounts = @import("planner/remote_mounts.zig");
+const cas_resolver = @import("planner/cas_resolver.zig");
 
 const ProjectOptions = workspace_types.ProjectOptions;
 const VirtualMapping = workspace_types.VirtualMapping;
@@ -35,7 +36,7 @@ pub fn planWorkspace(
         const mount_path = try allocator.dupe(u8, entry.mount_path);
         errdefer allocator.free(mount_path);
 
-        const source_abs_path = try resolveSourceAbsolutePath(allocator, entry, options.cache_root);
+        const source_abs_path = try cas_resolver.resolveSourceAbsolutePath(allocator, entry, options.cache_root);
         errdefer allocator.free(source_abs_path);
 
         try mappings.append(allocator, .{
@@ -85,34 +86,6 @@ pub fn planWorkspace(
     return .{
         .mappings = try mappings.toOwnedSlice(allocator),
     };
-}
-
-fn resolveSourceAbsolutePath(
-    allocator: std.mem.Allocator,
-    entry: validator.WorkspaceEntry,
-    cache_root: []const u8,
-) ![]u8 {
-    if (entry.host_source) |host_source| {
-        return std.fs.cwd().realpathAlloc(allocator, host_source);
-    }
-
-    const cas_digest = entry.cas_sha256 orelse return error.FileNotFound;
-    const digest_hex = std.fmt.bytesToHex(cas_digest, .lower);
-    const domain_name = switch (entry.cas_domain) {
-        .official => "official",
-        .third_party => "third_party",
-        .local => "local",
-    };
-    const cas_path = try std.fs.path.join(allocator, &.{
-        cache_root,
-        "cas",
-        domain_name,
-        "blob",
-        digest_hex[0..],
-        "blob.bin",
-    });
-    defer allocator.free(cas_path);
-    return std.fs.cwd().realpathAlloc(allocator, cas_path);
 }
 
 test "planWorkspace rejects duplicate mount path" {
