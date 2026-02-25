@@ -673,6 +673,14 @@ test "run supports TOML remote input extraction and mount projection" {
     var remote_digest: [32]u8 = undefined;
     hasher.final(&remote_digest);
     const remote_hex = std.fmt.bytesToHex(remote_digest, .lower);
+    try tmp.dir.makePath("expected/pkg");
+    try tmp.dir.writeFile(.{
+        .sub_path = "expected/pkg/remote.txt",
+        .data = "remote-run\n",
+    });
+    const expected_tree_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/expected", .{tmp.sub_path[0..]});
+    defer allocator.free(expected_tree_rel);
+    const remote_tree_hex = try workspace_projector.computeTreeRootHexForDir(allocator, expected_tree_rel);
 
     const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path[0..]});
     defer allocator.free(cache_root);
@@ -704,6 +712,7 @@ test "run supports TOML remote input extraction and mount projection" {
         \\id = "remote-src"
         \\url = "{s}"
         \\blob_sha256 = "{s}"
+        \\tree_root = "{s}"
         \\extract = true
         \\
         \\[[workspace.mounts]]
@@ -722,7 +731,7 @@ test "run supports TOML remote input extraction and mount projection" {
         \\publish_as = "remote.txt"
         \\mode = "0644"
     ,
-        .{ remote_url, remote_hex[0..] },
+        .{ remote_url, remote_hex[0..], remote_tree_hex[0..] },
     );
     defer allocator.free(source);
 

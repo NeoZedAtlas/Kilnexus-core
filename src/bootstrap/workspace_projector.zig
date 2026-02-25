@@ -37,6 +37,11 @@ pub const WorkspacePlan = struct {
     }
 };
 
+pub fn computeTreeRootHexForDir(allocator: std.mem.Allocator, dir_path: []const u8) ![64]u8 {
+    const digest = try computeTreeRootForDir(allocator, dir_path);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
 pub fn planWorkspace(
     allocator: std.mem.Allocator,
     workspace_spec: *const validator.WorkspaceSpec,
@@ -169,6 +174,7 @@ const RemotePrepared = struct {
     id: []const u8,
     root_abs_path: []u8,
     is_tree: bool,
+    tree_root: ?[32]u8 = null,
 };
 
 const RemoteSource = union(enum) {
@@ -210,28 +216,31 @@ fn prepareRemoteInputs(
 
         try ensureRemoteBlob(allocator, blob_path, remote, options);
         const blob_abs = try std.fs.cwd().realpathAlloc(allocator, blob_path);
-        errdefer allocator.free(blob_abs);
 
         if (!remote.extract) {
+            errdefer allocator.free(blob_abs);
             try prepared.append(allocator, .{
                 .id = remote.id,
                 .root_abs_path = blob_abs,
                 .is_tree = false,
+                .tree_root = null,
             });
             continue;
         }
 
+        const expected_tree_root = remote.tree_root orelse return error.MissingRequiredField;
         allocator.free(blob_abs);
+        const tree_hex = std.fmt.bytesToHex(expected_tree_root, .lower);
         const tree_path = try std.fs.path.join(allocator, &.{
             options.cache_root,
             "cas",
             "third_party",
             "tree",
-            blob_hex[0..],
+            tree_hex[0..],
         });
         defer allocator.free(tree_path);
 
-        try ensureRemoteExtractedTree(allocator, blob_path, tree_path, remote.id, options);
+        try ensureRemoteExtractedTree(allocator, blob_path, tree_path, expected_tree_root, remote.id, options);
         const tree_abs = try std.fs.cwd().realpathAlloc(allocator, tree_path);
         errdefer allocator.free(tree_abs);
 
@@ -239,6 +248,7 @@ fn prepareRemoteInputs(
             .id = remote.id,
             .root_abs_path = tree_abs,
             .is_tree = true,
+            .tree_root = expected_tree_root,
         });
     }
 
@@ -383,10 +393,17 @@ fn ensureRemoteExtractedTree(
     allocator: std.mem.Allocator,
     blob_path: []const u8,
     tree_path: []const u8,
+    expected_tree_root: [32]u8,
     remote_id: []const u8,
     options: ProjectOptions,
 ) !void {
-    if (try pathIsDirectory(tree_path)) return;
+    if (try pathIsDirectory(tree_path)) {
+        const existing_root = try computeTreeRootForDir(allocator, tree_path);
+        if (!std.mem.eql(u8, &existing_root, &expected_tree_root)) {
+            return error.TreeRootMismatch;
+        }
+        return;
+    }
 
     const staging_tag = try std.fmt.allocPrint(allocator, "remote-{s}-{d}", .{ remote_id, std.time.microTimestamp() });
     defer allocator.free(staging_tag);
@@ -400,6 +417,10 @@ fn ensureRemoteExtractedTree(
     errdefer std.fs.cwd().deleteTree(staging_path) catch {};
 
     try extractBlobToDirectory(blob_path, staging_path);
+    const computed_root = try computeTreeRootForDir(allocator, staging_path);
+    if (!std.mem.eql(u8, &computed_root, &expected_tree_root)) {
+        return error.TreeRootMismatch;
+    }
 
     if (std.fs.path.dirname(tree_path)) |parent| {
         try std.fs.cwd().makePath(parent);
@@ -542,6 +563,14 @@ const FileDigest = struct {
     size: u64,
 };
 
+const TreeEntryDigest = struct {
+    path: []u8,
+    kind: u8,
+    mode: u32,
+    size: u64,
+    digest: [32]u8,
+};
+
 fn hashFileAtPath(path: []const u8) !FileDigest {
     var file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
@@ -566,6 +595,72 @@ fn hashFile(file: *std.fs.File) !FileDigest {
         .digest = digest,
         .size = size,
     };
+}
+
+fn computeTreeRootForDir(allocator: std.mem.Allocator, dir_path: []const u8) ![32]u8 {
+    var root_dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer root_dir.close();
+
+    var walker = try root_dir.walk(allocator);
+    defer walker.deinit();
+
+    var entries: std.ArrayList(TreeEntryDigest) = .empty;
+    defer {
+        for (entries.items) |entry| allocator.free(entry.path);
+        entries.deinit(allocator);
+    }
+
+    while (try walker.next()) |entry| {
+        switch (entry.kind) {
+            .directory => continue,
+            .sym_link => return error.SymlinkPolicyViolation,
+            .file => {
+                var file = try entry.dir.openFile(entry.basename, .{});
+                defer file.close();
+                const digest = try hashFile(&file);
+                const stat = try file.stat();
+                try entries.append(allocator, .{
+                    .path = try allocator.dupe(u8, entry.path),
+                    .kind = 1,
+                    .mode = normalizeTreeEntryMode(stat.mode),
+                    .size = digest.size,
+                    .digest = digest.digest,
+                });
+            },
+            else => return error.SymlinkPolicyViolation,
+        }
+    }
+
+    std.sort.pdq(TreeEntryDigest, entries.items, {}, struct {
+        fn lessThan(_: void, lhs: TreeEntryDigest, rhs: TreeEntryDigest) bool {
+            return std.mem.order(u8, lhs.path, rhs.path) == .lt;
+        }
+    }.lessThan);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (entries.items) |entry| {
+        var mode_bytes: [4]u8 = undefined;
+        var size_bytes: [8]u8 = undefined;
+        hasher.update(entry.path);
+        hasher.update(&[_]u8{0});
+        hasher.update(&[_]u8{entry.kind});
+        std.mem.writeInt(u32, &mode_bytes, entry.mode, .little);
+        hasher.update(&mode_bytes);
+        std.mem.writeInt(u64, &size_bytes, entry.size, .little);
+        hasher.update(&size_bytes);
+        hasher.update(&entry.digest);
+    }
+
+    var root: [32]u8 = undefined;
+    hasher.final(&root);
+    return root;
+}
+
+fn normalizeTreeEntryMode(mode: std.fs.File.Mode) u32 {
+    if (std.fs.has_executable_bit and (mode & 0o111) != 0) {
+        return 0o755;
+    }
+    return 0o644;
 }
 
 fn computeDeadlineMs(timeout_ms: u64) ?u64 {
@@ -1258,6 +1353,14 @@ test "planWorkspace materializes remote tar input and mounts extracted file" {
     const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{sub});
     defer allocator.free(cache_root);
     const digest = try hashFileAtPath(remote_rel);
+    try tmp.dir.makePath("expected/pkg");
+    try tmp.dir.writeFile(.{
+        .sub_path = "expected/pkg/a.txt",
+        .data = "from-archive\n",
+    });
+    const expected_tree_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/expected", .{sub});
+    defer allocator.free(expected_tree_rel);
+    const expected_tree_root = try computeTreeRootForDir(allocator, expected_tree_rel);
 
     var mounts = try allocator.alloc(validator.WorkspaceMountSpec, 1);
     mounts[0] = .{
@@ -1270,6 +1373,7 @@ test "planWorkspace materializes remote tar input and mounts extracted file" {
         .id = try allocator.dupe(u8, "remote-src"),
         .url = try allocator.dupe(u8, remote_url),
         .blob_sha256 = digest.digest,
+        .tree_root = expected_tree_root,
         .extract = true,
     };
     var spec: validator.WorkspaceSpec = .{
@@ -1294,4 +1398,59 @@ test "planWorkspace materializes remote tar input and mounts extracted file" {
     const bytes = try std.fs.cwd().readFileAlloc(allocator, projected, 1024);
     defer allocator.free(bytes);
     try std.testing.expectEqualStrings("from-archive\n", bytes);
+}
+
+test "planWorkspace rejects remote extract when tree_root mismatches" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var tar_writer: std.tar.Writer = .{
+        .underlying_writer = &out.writer,
+    };
+    try tar_writer.writeFileBytes("pkg/a.txt", "from-archive\n", .{});
+    try tar_writer.finishPedantically();
+    const tar_bytes = try out.toOwnedSlice();
+    defer allocator.free(tar_bytes);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "remote.tar",
+        .data = tar_bytes,
+    });
+
+    const sub = tmp.sub_path[0..];
+    const remote_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/remote.tar", .{sub});
+    defer allocator.free(remote_rel);
+    const remote_url = try std.fmt.allocPrint(allocator, "file://{s}", .{remote_rel});
+    defer allocator.free(remote_url);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{sub});
+    defer allocator.free(cache_root);
+    const digest = try hashFileAtPath(remote_rel);
+
+    var mounts = try allocator.alloc(validator.WorkspaceMountSpec, 1);
+    mounts[0] = .{
+        .source = try allocator.dupe(u8, "remote-src/pkg/a.txt"),
+        .target = try allocator.dupe(u8, "src/a.txt"),
+        .mode = 0o444,
+    };
+    var remotes = try allocator.alloc(validator.RemoteInputSpec, 1);
+    remotes[0] = .{
+        .id = try allocator.dupe(u8, "remote-src"),
+        .url = try allocator.dupe(u8, remote_url),
+        .blob_sha256 = digest.digest,
+        .tree_root = [_]u8{0xaa} ** 32,
+        .extract = true,
+    };
+    var spec: validator.WorkspaceSpec = .{
+        .entries = try allocator.alloc(validator.WorkspaceEntry, 0),
+        .remote_inputs = remotes,
+        .mounts = mounts,
+    };
+    defer spec.deinit(allocator);
+
+    try std.testing.expectError(error.TreeRootMismatch, planWorkspace(allocator, &spec, .{
+        .cache_root = cache_root,
+    }));
 }

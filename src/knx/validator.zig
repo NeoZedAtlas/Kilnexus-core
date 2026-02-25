@@ -56,6 +56,7 @@ pub const RemoteInputSpec = struct {
     id: []u8,
     url: []u8,
     blob_sha256: [32]u8,
+    tree_root: ?[32]u8 = null,
     extract: bool,
 
     pub fn deinit(self: *RemoteInputSpec, allocator: std.mem.Allocator) void {
@@ -943,8 +944,13 @@ fn parseRemoteInputs(
         const id_text = try expectNonEmptyString(obj, "id");
         const url_text = try expectNonEmptyString(obj, "url");
         const blob_text = try expectNonEmptyString(obj, "blob_sha256");
+        const tree_root = if (obj.get("tree_root")) |tree_value| blk: {
+            const tree_text = try expectString(tree_value, "tree_root");
+            break :blk try parseHexFixed(32, tree_text);
+        } else null;
 
         const extract = if (obj.get("extract")) |extract_value| try expectBool(extract_value, "extract") else false;
+        if (extract and tree_root == null) return error.MissingRequiredField;
 
         const id = try allocator.dupe(u8, id_text);
         errdefer allocator.free(id);
@@ -955,6 +961,7 @@ fn parseRemoteInputs(
             .id = id,
             .url = url,
             .blob_sha256 = try parseHexFixed(32, blob_text),
+            .tree_root = tree_root,
             .extract = extract,
         });
     }
@@ -1484,6 +1491,51 @@ test "parseWorkspaceSpec parses inputs and deps entries" {
     try std.testing.expect(spec.entries[1].cas_sha256 != null);
     try std.testing.expectEqual(CasDomain.third_party, spec.entries[1].cas_domain);
     try std.testing.expect(spec.entries[1].is_dependency);
+}
+
+test "parseWorkspaceSpec requires remote tree_root when extract is true" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "inputs": {
+        \\    "remote": [
+        \\      {
+        \\        "id": "remote-src",
+        \\        "url": "file://tmp/remote.tar",
+        \\        "blob_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        \\        "extract": true
+        \\      }
+        \\    ]
+        \\  },
+        \\  "workspace": {
+        \\    "mounts": [
+        \\      { "source": "remote-src/pkg/a.c", "target": "src/a.c", "mode": "0444" }
+        \\    ]
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.MissingRequiredField, parseWorkspaceSpec(allocator, json));
 }
 
 test "parseOutputSpec parses output entries" {
