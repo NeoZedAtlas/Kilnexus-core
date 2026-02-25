@@ -464,8 +464,13 @@ test "run completes bootstrap happy path" {
         \\  "inputs": [
         \\    {{ "path": "src/app", "source": "{s}" }}
         \\  ],
-        \\  "build": [
-        \\    {{ "op": "knx.fs.copy", "from": "src/app", "to": "kilnexus-out/app" }}
+        \\  "operators": [
+        \\    {{
+        \\      "id": "copy-final",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/app"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }}
         \\  ],
         \\  "outputs": [
         \\    {{ "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }}
@@ -798,6 +803,14 @@ test "run fails on policy violation" {
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
+        \\  "operators": [
+        \\    {
+        \\      "id": "copy-final",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }
+        \\  ],
         \\  "outputs": [
         \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
@@ -853,8 +866,13 @@ test "attemptRunWithOptions rejects build writes into mounted input path" {
         \\  "inputs": [
         \\    { "path": "src/main.c", "source": "project/src/main.c" }
         \\  ],
-        \\  "build": [
-        \\    { "op": "knx.fs.copy", "from": "src/main.c", "to": "src/main.c" }
+        \\  "operators": [
+        \\    {
+        \\      "id": "copy-into-mount",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["src/main.c"]
+        \\    }
         \\  ],
         \\  "outputs": [
         \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
@@ -952,6 +970,14 @@ test "attemptRunWithOptions fails at download when source file is missing" {
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
+        \\  "operators": [
+        \\    {
+        \\      "id": "copy-final",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }
+        \\  ],
         \\  "outputs": [
         \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
@@ -1001,6 +1027,14 @@ test "attemptRunWithOptions fails in execute stage when declared source is missi
         \\  "inputs": [
         \\    { "path": "src/main.c", "source": "__missing_source__.c" }
         \\  ],
+        \\  "operators": [
+        \\    {
+        \\      "id": "copy-final",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }
+        \\  ],
         \\  "outputs": [
         \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
         \\  ]
@@ -1047,8 +1081,13 @@ test "attemptRunWithOptions maps missing toolchain for c.compile to build failur
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
-        \\  "build": [
-        \\    { "op": "knx.c.compile", "src": "src/main.c", "out": "obj/main.o" }
+        \\  "operators": [
+        \\    {
+        \\      "id": "compile-main",
+        \\      "run": "knx.c.compile",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["obj/main.o"]
+        \\    }
         \\  ],
         \\  "outputs": [
         \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
@@ -1116,8 +1155,13 @@ test "attemptRunWithOptions fails at verify_outputs on declared output sha misma
         \\  "inputs": [
         \\    {{ "path": "src/app", "source": "{s}" }}
         \\  ],
-        \\  "build": [
-        \\    {{ "op": "knx.fs.copy", "from": "src/app", "to": "kilnexus-out/app" }}
+        \\  "operators": [
+        \\    {{
+        \\      "id": "copy-final",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/app"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }}
         \\  ],
         \\  "outputs": [
         \\    {{
@@ -1202,11 +1246,12 @@ test "run publishes archive.pack output from workspace inputs" {
         \\    {{ "path": "obj/a.o", "source": "{s}" }},
         \\    {{ "path": "obj/b.o", "source": "{s}" }}
         \\  ],
-        \\  "build": [
+        \\  "operators": [
         \\    {{
-        \\      "op": "knx.archive.pack",
+        \\      "id": "pack-objects",
+        \\      "run": "knx.archive.pack",
         \\      "inputs": ["obj/a.o", "obj/b.o"],
-        \\      "out": "kilnexus-out/objects.tar"
+        \\      "outputs": ["kilnexus-out/objects.tar"]
         \\    }}
         \\  ],
         \\  "outputs": [
@@ -1313,11 +1358,12 @@ test "run publishes archive.pack tar.gz output from workspace inputs" {
         \\    {{ "path": "obj/a.o", "source": "{s}" }},
         \\    {{ "path": "obj/b.o", "source": "{s}" }}
         \\  ],
-        \\  "build": [
+        \\  "operators": [
         \\    {{
-        \\      "op": "knx.archive.pack",
+        \\      "id": "pack-objects",
+        \\      "run": "knx.archive.pack",
         \\      "inputs": ["obj/a.o", "obj/b.o"],
-        \\      "out": "kilnexus-out/objects.tar.gz",
+        \\      "outputs": ["kilnexus-out/objects.tar.gz"],
         \\      "format": "tar.gz"
         \\    }}
         \\  ],

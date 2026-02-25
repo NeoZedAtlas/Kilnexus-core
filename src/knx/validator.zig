@@ -333,25 +333,25 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
         }
     }
 
-    if (root.get("operators")) |operators_value| {
-        const operators = try expectArray(operators_value, "operators");
-        for (operators.items) |op_value| {
-            const op_obj = try expectObject(op_value, "operator");
-            const op_id = try expectNonEmptyString(op_obj, "id");
-            try validateOperatorId(op_id);
-            const op = try expectNonEmptyString(op_obj, "run");
-            if (!isAllowedOperator(op)) return error.OperatorNotAllowed;
-            if (std.mem.eql(u8, op, "knx.fs.copy")) {
-                try ensureOnlyKeys(op_obj, operator_fs_copy_keys[0..]);
-            } else if (std.mem.eql(u8, op, "knx.c.compile")) {
-                try ensureOnlyKeys(op_obj, operator_c_compile_keys[0..]);
-            } else if (std.mem.eql(u8, op, "knx.zig.link")) {
-                try ensureOnlyKeys(op_obj, operator_zig_link_keys[0..]);
-            } else if (std.mem.eql(u8, op, "knx.archive.pack")) {
-                try ensureOnlyKeys(op_obj, operator_archive_pack_keys[0..]);
-            } else {
-                return error.OperatorNotAllowed;
-            }
+    if (root.get("build") != null) return error.ValueInvalid;
+    const operators_value = root.get("operators") orelse return error.MissingRequiredField;
+    const operators = try expectArray(operators_value, "operators");
+    for (operators.items) |op_value| {
+        const op_obj = try expectObject(op_value, "operator");
+        const op_id = try expectNonEmptyString(op_obj, "id");
+        try validateOperatorId(op_id);
+        const op = try expectNonEmptyString(op_obj, "run");
+        if (!isAllowedOperator(op)) return error.OperatorNotAllowed;
+        if (std.mem.eql(u8, op, "knx.fs.copy")) {
+            try ensureOnlyKeys(op_obj, operator_fs_copy_keys[0..]);
+        } else if (std.mem.eql(u8, op, "knx.c.compile")) {
+            try ensureOnlyKeys(op_obj, operator_c_compile_keys[0..]);
+        } else if (std.mem.eql(u8, op, "knx.zig.link")) {
+            try ensureOnlyKeys(op_obj, operator_zig_link_keys[0..]);
+        } else if (std.mem.eql(u8, op, "knx.archive.pack")) {
+            try ensureOnlyKeys(op_obj, operator_archive_pack_keys[0..]);
+        } else {
+            return error.OperatorNotAllowed;
         }
     }
 
@@ -532,155 +532,10 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
     defer parsed.deinit();
 
     const root = try expectObject(parsed.value, "root");
-    if (root.get("operators") != null and root.get("build") != null) {
-        return error.ValueInvalid;
-    }
-    if (root.get("operators")) |operators_value| {
-        const operators = try expectArray(operators_value, "operators");
-        return parseOperatorsBuildSpec(allocator, operators);
-    }
-    const build_value = root.get("build") orelse {
-        return .{
-            .ops = try allocator.alloc(BuildOp, 0),
-        };
-    };
-    const build_array = try expectArray(build_value, "build");
-
-    var ops: std.ArrayList(BuildOp) = .empty;
-    errdefer {
-        for (ops.items) |*op| op.deinit(allocator);
-        ops.deinit(allocator);
-    }
-
-    for (build_array.items) |item| {
-        const obj = try expectObject(item, "build op");
-        const op_name = try expectNonEmptyString(obj, "op");
-
-        if (std.mem.eql(u8, op_name, "knx.fs.copy")) {
-            const from_text = try expectNonEmptyString(obj, "from");
-            const to_text = try expectNonEmptyString(obj, "to");
-            try validateWorkspaceRelativePath(from_text);
-            try validateWorkspaceRelativePath(to_text);
-
-            const from_path = try allocator.dupe(u8, from_text);
-            errdefer allocator.free(from_path);
-            const to_path = try allocator.dupe(u8, to_text);
-            errdefer allocator.free(to_path);
-
-            try ops.append(allocator, .{
-                .fs_copy = .{
-                    .from_path = from_path,
-                    .to_path = to_path,
-                },
-            });
-            continue;
-        }
-
-        if (std.mem.eql(u8, op_name, "knx.c.compile")) {
-            const src_text = try expectNonEmptyString(obj, "src");
-            const out_text = try expectNonEmptyString(obj, "out");
-            try validateWorkspaceRelativePath(src_text);
-            try validateWorkspaceRelativePath(out_text);
-            const args = try parseOptionalArgs(allocator, obj, isAllowedCompileArg);
-            errdefer freeOwnedStrings(allocator, args);
-
-            const src_path = try allocator.dupe(u8, src_text);
-            errdefer allocator.free(src_path);
-            const out_path = try allocator.dupe(u8, out_text);
-            errdefer allocator.free(out_path);
-
-            try ops.append(allocator, .{
-                .c_compile = .{
-                    .src_path = src_path,
-                    .out_path = out_path,
-                    .args = args,
-                },
-            });
-            continue;
-        }
-        if (std.mem.eql(u8, op_name, "knx.zig.link")) {
-            const out_text = try expectNonEmptyString(obj, "out");
-            try validateWorkspaceRelativePath(out_text);
-            const objects = try expectArrayField(obj, "objects");
-            if (objects.items.len == 0) return error.ValueInvalid;
-
-            var object_paths_list: std.ArrayList([]u8) = .empty;
-            errdefer {
-                for (object_paths_list.items) |path| allocator.free(path);
-                object_paths_list.deinit(allocator);
-            }
-            for (objects.items, 0..) |obj_path_value, idx| {
-                _ = idx;
-                const path_text = try expectString(obj_path_value, "object path");
-                if (path_text.len == 0) return error.ValueInvalid;
-                try validateWorkspaceRelativePath(path_text);
-                try object_paths_list.append(allocator, try allocator.dupe(u8, path_text));
-            }
-            const object_paths = try object_paths_list.toOwnedSlice(allocator);
-            errdefer {
-                for (object_paths) |path| allocator.free(path);
-                allocator.free(object_paths);
-            }
-
-            const out_path = try allocator.dupe(u8, out_text);
-            errdefer allocator.free(out_path);
-            const args = try parseOptionalArgs(allocator, obj, isAllowedLinkArg);
-            errdefer freeOwnedStrings(allocator, args);
-
-            try ops.append(allocator, .{
-                .zig_link = .{
-                    .object_paths = object_paths,
-                    .out_path = out_path,
-                    .args = args,
-                },
-            });
-            continue;
-        }
-        if (std.mem.eql(u8, op_name, "knx.archive.pack")) {
-            const out_text = try expectNonEmptyString(obj, "out");
-            try validateWorkspaceRelativePath(out_text);
-            const format = if (obj.get("format")) |format_value| blk: {
-                const format_text = try expectString(format_value, "archive format");
-                break :blk parseArchiveFormat(format_text) orelse return error.ValueInvalid;
-            } else .tar;
-            const inputs = try expectArrayField(obj, "inputs");
-            if (inputs.items.len == 0) return error.ValueInvalid;
-
-            var input_paths_list: std.ArrayList([]u8) = .empty;
-            errdefer {
-                for (input_paths_list.items) |path| allocator.free(path);
-                input_paths_list.deinit(allocator);
-            }
-            for (inputs.items) |input_value| {
-                const input_text = try expectString(input_value, "archive input path");
-                if (input_text.len == 0) return error.ValueInvalid;
-                try validateWorkspaceRelativePath(input_text);
-                try input_paths_list.append(allocator, try allocator.dupe(u8, input_text));
-            }
-            const input_paths = try input_paths_list.toOwnedSlice(allocator);
-            errdefer {
-                for (input_paths) |path| allocator.free(path);
-                allocator.free(input_paths);
-            }
-
-            const out_path = try allocator.dupe(u8, out_text);
-            errdefer allocator.free(out_path);
-
-            try ops.append(allocator, .{
-                .archive_pack = .{
-                    .input_paths = input_paths,
-                    .out_path = out_path,
-                    .format = format,
-                },
-            });
-            continue;
-        }
-        return error.OperatorNotAllowed;
-    }
-
-    return .{
-        .ops = try ops.toOwnedSlice(allocator),
-    };
+    if (root.get("build") != null) return error.ValueInvalid;
+    const operators_value = root.get("operators") orelse return error.MissingRequiredField;
+    const operators = try expectArray(operators_value, "operators");
+    return parseOperatorsBuildSpec(allocator, operators);
 }
 
 const OperatorDecl = struct {
@@ -1812,8 +1667,13 @@ test "parseBuildSpec parses fs.copy operation" {
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
-        \\  "build": [
-        \\    { "op": "knx.fs.copy", "from": "src/main.c", "to": "kilnexus-out/app" }
+        \\  "operators": [
+        \\    {
+        \\      "id": "copy-main",
+        \\      "run": "knx.fs.copy",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["kilnexus-out/app"]
+        \\    }
         \\  ],
         \\  "outputs": [
         \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
@@ -1855,18 +1715,20 @@ test "parseBuildSpec parses c.compile and zig.link operations" {
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
-        \\  "build": [
+        \\  "operators": [
         \\    {
-        \\      "op": "knx.c.compile",
-        \\      "src": "src/main.c",
-        \\      "out": "obj/main.o",
-        \\      "args": ["-O2", "-std=c11"]
+        \\      "id": "compile-main",
+        \\      "run": "knx.c.compile",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["obj/main.o"],
+        \\      "flags": ["-O2", "-std=c11"]
         \\    },
         \\    {
-        \\      "op": "knx.zig.link",
-        \\      "objects": ["obj/main.o"],
-        \\      "out": "kilnexus-out/app",
-        \\      "args": ["-static"]
+        \\      "id": "link-final",
+        \\      "run": "knx.zig.link",
+        \\      "inputs": ["obj/main.o"],
+        \\      "outputs": ["kilnexus-out/app"],
+        \\      "flags": ["-static"]
         \\    }
         \\  ],
         \\  "outputs": [
@@ -1922,12 +1784,13 @@ test "parseBuildSpec rejects disallowed compile arg" {
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
-        \\  "build": [
+        \\  "operators": [
         \\    {
-        \\      "op": "knx.c.compile",
-        \\      "src": "src/main.c",
-        \\      "out": "obj/main.o",
-        \\      "args": ["-fplugin=evil.so"]
+        \\      "id": "compile-main",
+        \\      "run": "knx.c.compile",
+        \\      "inputs": ["src/main.c"],
+        \\      "outputs": ["obj/main.o"],
+        \\      "flags": ["-fplugin=evil.so"]
         \\    }
         \\  ],
         \\  "outputs": [
@@ -1960,11 +1823,12 @@ test "parseBuildSpec parses archive.pack operation" {
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
-        \\  "build": [
+        \\  "operators": [
         \\    {
-        \\      "op": "knx.archive.pack",
+        \\      "id": "pack-objects",
+        \\      "run": "knx.archive.pack",
         \\      "inputs": ["obj/a.o", "obj/b.o"],
-        \\      "out": "kilnexus-out/objects.tar"
+        \\      "outputs": ["kilnexus-out/objects.tar"]
         \\    }
         \\  ],
         \\  "outputs": [
@@ -2010,11 +1874,12 @@ test "parseBuildSpec parses archive.pack tar.gz format" {
         \\    "LANG": "C",
         \\    "SOURCE_DATE_EPOCH": "1735689600"
         \\  },
-        \\  "build": [
+        \\  "operators": [
         \\    {
-        \\      "op": "knx.archive.pack",
+        \\      "id": "pack-objects",
+        \\      "run": "knx.archive.pack",
         \\      "inputs": ["obj/a.o"],
-        \\      "out": "kilnexus-out/objects.tar.gz",
+        \\      "outputs": ["kilnexus-out/objects.tar.gz"],
         \\      "format": "tar.gz"
         \\    }
         \\  ],
@@ -2243,4 +2108,67 @@ test "parseWorkspaceSpec rejects unknown workspace mount key" {
     ;
 
     try std.testing.expectError(error.ValueInvalid, parseWorkspaceSpec(allocator, json));
+}
+
+test "parseBuildSpec rejects legacy build block" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    { "op": "knx.fs.copy", "from": "src/a", "to": "obj/a" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.ValueInvalid, parseBuildSpec(allocator, json));
+}
+
+test "validateCanonicalJson rejects missing operators block" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "outputs": [
+        \\    { "source": "kilnexus-out/app", "publish_as": "app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.MissingRequiredField, validateCanonicalJson(allocator, json));
 }
