@@ -137,6 +137,7 @@ fn pathExists(path: []const u8) !bool {
 }
 
 fn syncFilePath(path: []const u8) !void {
+    if (@import("builtin").os.tag == .windows) return;
     var file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.IsDir => return error.OutputMissing,
         else => return err,

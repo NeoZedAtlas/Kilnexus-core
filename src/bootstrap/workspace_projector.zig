@@ -50,7 +50,9 @@ pub fn planWorkspace(
         try validateMountPath(entry.mount_path);
         if (seen_mounts.contains(entry.mount_path)) return error.DuplicateMountPath;
         try seen_mounts.put(entry.mount_path, {});
+    }
 
+    for (workspace_spec.entries) |entry| {
         const mount_path = try allocator.dupe(u8, entry.mount_path);
         errdefer allocator.free(mount_path);
 

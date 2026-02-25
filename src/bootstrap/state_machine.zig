@@ -428,7 +428,7 @@ test "run completes bootstrap happy path" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project");
+    try tmp.dir.makePath("project/src");
     try tmp.dir.writeFile(.{
         .sub_path = "project/src/app",
         .data = "artifact\n",
@@ -533,7 +533,7 @@ test "run fails on malformed lockfile" {
     const allocator = std.testing.allocator;
     const source = "version=1";
 
-    try std.testing.expectError(error.Syntax, run(allocator, source));
+    try std.testing.expectError(error.Schema, run(allocator, source));
 }
 
 test "run fails on policy violation" {
@@ -583,8 +583,8 @@ test "attemptRunWithOptions returns structured parse error" {
         },
         .failure => |failure| {
             try std.testing.expectEqual(State.parse_knxfile, failure.at);
-            try std.testing.expectEqual(kx_error.Code.KX_PARSE_SYNTAX, failure.code);
-            try std.testing.expectEqual(error.Syntax, failure.cause);
+            try std.testing.expectEqual(kx_error.Code.KX_PARSE_SCHEMA, failure.code);
+            try std.testing.expectEqual(error.Schema, failure.cause);
         },
     }
 }

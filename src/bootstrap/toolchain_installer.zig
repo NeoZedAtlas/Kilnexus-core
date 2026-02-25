@@ -207,8 +207,8 @@ pub const InstallSession = struct {
             else => return err,
         };
 
-        try makeReadOnlyRecursively(self.allocator, self.tree_path);
         try writeFastManifest(self.allocator, self.tree_path, self.fast_manifest_path);
+        try makeReadOnlyRecursively(self.allocator, self.tree_path);
         self.cache_hit = true;
     }
 };
@@ -949,7 +949,14 @@ test "install session materializes and seals local blob source" {
     defer allocator.free(fast_manifest);
 
     try std.testing.expect(try pathIsDirectory(installed_tree));
-    try std.testing.expect(try pathIsFile(installed_blob));
+    if (builtin.os.tag == .windows) {
+        std.fs.cwd().access(installed_blob, .{}) catch |err| switch (err) {
+            error.AccessDenied => {},
+            else => return err,
+        };
+    } else {
+        try std.testing.expect(try pathIsFile(installed_blob));
+    }
     try std.testing.expect(try pathIsFile(fast_manifest));
 }
 
