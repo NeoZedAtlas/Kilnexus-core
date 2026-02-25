@@ -23,6 +23,7 @@ pub const Code = enum(u32) {
     KX_PARSE_VERSION_UNSUPPORTED = 1008,
     KX_PARSE_OPERATOR_DISALLOWED = 1009,
     KX_PARSE_OUTPUT_INVALID = 1010,
+    KX_PARSE_LEGACY_BUILD_BLOCK = 1011,
 
     KX_TRUST_METADATA_MISSING = 2001,
     KX_TRUST_METADATA_MALFORMED = 2002,
@@ -130,6 +131,7 @@ pub fn describe(code: Code) Descriptor {
         .KX_PARSE_VERSION_UNSUPPORTED => .{ .family = .parse, .summary = "lockfile version unsupported" },
         .KX_PARSE_OPERATOR_DISALLOWED => .{ .family = .parse, .summary = "lockfile contains disallowed operator" },
         .KX_PARSE_OUTPUT_INVALID => .{ .family = .parse, .summary = "lockfile output mapping invalid" },
+        .KX_PARSE_LEGACY_BUILD_BLOCK => .{ .family = .parse, .summary = "legacy build block is disallowed; use operators" },
 
         .KX_TRUST_METADATA_MISSING => .{ .family = .trust, .summary = "required trust metadata missing" },
         .KX_TRUST_METADATA_MALFORMED => .{ .family = .trust, .summary = "trust metadata JSON is malformed or missing required fields" },
@@ -252,6 +254,7 @@ pub fn classifyParse(err: anyerror) Code {
     if (err == error.VersionUnsupported) return .KX_PARSE_VERSION_UNSUPPORTED;
     if (err == error.OperatorDisallowed) return .KX_PARSE_OPERATOR_DISALLOWED;
     if (err == error.OutputInvalid) return .KX_PARSE_OUTPUT_INVALID;
+    if (err == error.LegacyBuildBlock) return .KX_PARSE_LEGACY_BUILD_BLOCK;
 
     return .KX_INTERNAL;
 }
@@ -488,6 +491,7 @@ test "classifyParse maps schema and syntax" {
     try std.testing.expectEqual(Code.KX_PARSE_SYNTAX, classifyParse(error.Syntax));
     try std.testing.expectEqual(Code.KX_PARSE_SCHEMA, classifyParse(error.Schema));
     try std.testing.expectEqual(Code.KX_PARSE_VALUE_INVALID, classifyParse(error.ValueInvalid));
+    try std.testing.expectEqual(Code.KX_PARSE_LEGACY_BUILD_BLOCK, classifyParse(error.LegacyBuildBlock));
 }
 
 test "buildErrorId is stable" {

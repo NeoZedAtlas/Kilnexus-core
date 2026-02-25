@@ -294,6 +294,7 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
 
     const root = try expectObject(parsed.value, "root");
     try expectVersion(root);
+    if (root.get("build") != null) return error.LegacyBuildBlock;
     _ = try expectNonEmptyString(root, "target");
 
     const toolchain = try expectObjectField(root, "toolchain");
@@ -333,7 +334,6 @@ pub fn validateCanonicalJson(allocator: std.mem.Allocator, canonical_json: []con
         }
     }
 
-    if (root.get("build") != null) return error.ValueInvalid;
     const operators_value = root.get("operators") orelse return error.MissingRequiredField;
     const operators = try expectArray(operators_value, "operators");
     for (operators.items) |op_value| {
@@ -532,7 +532,7 @@ pub fn parseBuildSpec(allocator: std.mem.Allocator, canonical_json: []const u8) 
     defer parsed.deinit();
 
     const root = try expectObject(parsed.value, "root");
-    if (root.get("build") != null) return error.ValueInvalid;
+    if (root.get("build") != null) return error.LegacyBuildBlock;
     const operators_value = root.get("operators") orelse return error.MissingRequiredField;
     const operators = try expectArray(operators_value, "operators");
     return parseOperatorsBuildSpec(allocator, operators);
@@ -2021,7 +2021,7 @@ test "parseBuildSpec rejects simultaneous operators and build blocks" {
         \\}
     ;
 
-    try std.testing.expectError(error.ValueInvalid, parseBuildSpec(allocator, json));
+    try std.testing.expectError(error.LegacyBuildBlock, parseBuildSpec(allocator, json));
 }
 
 test "parseBuildSpec rejects duplicate operator ids" {
@@ -2140,7 +2140,40 @@ test "parseBuildSpec rejects legacy build block" {
         \\}
     ;
 
-    try std.testing.expectError(error.ValueInvalid, parseBuildSpec(allocator, json));
+    try std.testing.expectError(error.LegacyBuildBlock, parseBuildSpec(allocator, json));
+}
+
+test "validateCanonicalJson prioritizes legacy build block over other schema errors" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "build": [
+        \\    { "op": "knx.fs.copy", "from": "src/a", "to": "obj/a" }
+        \\  ],
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    try std.testing.expectError(error.LegacyBuildBlock, validateCanonicalJson(allocator, json));
 }
 
 test "validateCanonicalJson rejects missing operators block" {

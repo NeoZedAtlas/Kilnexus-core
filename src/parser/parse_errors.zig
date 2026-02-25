@@ -11,6 +11,7 @@ pub const ParseError = error{
     VersionUnsupported,
     OperatorDisallowed,
     OutputInvalid,
+    LegacyBuildBlock,
     Internal,
 };
 
@@ -47,6 +48,10 @@ pub fn normalize(err: anyerror) ParseError {
         return error.OutputInvalid;
     }
 
+    if (err == error.LegacyBuildBlock) {
+        return error.LegacyBuildBlock;
+    }
+
     return error.Internal;
 }
 
@@ -55,4 +60,5 @@ test "normalize maps parser and validator errors into canonical parse errors" {
     try std.testing.expect(normalize(error.MissingVersion) == error.MissingField);
     try std.testing.expect(normalize(error.InvalidPolicyNetwork) == error.ValueInvalid);
     try std.testing.expect(normalize(error.InvalidMode) == error.OutputInvalid);
+    try std.testing.expect(normalize(error.LegacyBuildBlock) == error.LegacyBuildBlock);
 }
