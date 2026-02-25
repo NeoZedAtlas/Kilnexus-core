@@ -81,6 +81,7 @@ pub fn atomicPublish(
         } else {
             try syncFilePath(staged_path);
         }
+        try verifyOutputMode(staged_path, entry.mode);
 
         if (std.fs.path.dirname(staged_path)) |parent| {
             try syncDirPath(parent);
@@ -142,6 +143,20 @@ fn syncFilePath(path: []const u8) !void {
     };
     defer file.close();
     file.sync() catch return error.FsyncFailed;
+}
+
+fn verifyOutputMode(path: []const u8, expected_mode: u16) !void {
+    if (!std.fs.has_executable_bit) return;
+
+    var file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.IsDir => return error.OutputMissing,
+        else => return err,
+    };
+    defer file.close();
+
+    const stat = file.stat() catch return error.PermissionDenied;
+    const actual_mode: u16 = @intCast(stat.mode & 0o777);
+    if (actual_mode != expected_mode) return error.PermissionDenied;
 }
 
 fn syncDirPath(path: []const u8) !void {
@@ -215,6 +230,8 @@ fn writeCurrentPointer(
         try writer.writeAll(digest_hex[0..]);
         try writer.writeAll("\",\"size\":");
         try writer.print("{d}", .{hashed.size});
+        try writer.writeAll(",\"mode\":");
+        try writeModeStringJson(writer, entry.mode);
         try writer.writeAll("}");
     }
     try writer.writeAll("]");
@@ -231,6 +248,15 @@ fn writeCurrentPointer(
 
 fn hashOpenFile(file: *std.fs.File) ![32]u8 {
     return (try hashOpenFileWithSize(file)).digest;
+}
+
+fn writeModeStringJson(writer: *std.Io.Writer, mode: u16) !void {
+    var text: [4]u8 = undefined;
+    text[0] = '0';
+    text[1] = @as(u8, @intCast((mode >> 6) & 0x7)) + '0';
+    text[2] = @as(u8, @intCast((mode >> 3) & 0x7)) + '0';
+    text[3] = @as(u8, @intCast(mode & 0x7)) + '0';
+    try std.json.Stringify.encodeJsonString(text[0..], .{}, writer);
 }
 
 const HashWithSize = struct {
@@ -354,6 +380,11 @@ test "verifyWorkspaceOutputs and atomicPublish publish declared outputs" {
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(@as(i64, 9), out_size);
+    const out_mode = switch (first_output.get("mode") orelse return error.TestUnexpectedResult) {
+        .string => |str| str,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("0755", out_mode);
 
     if (std.fs.has_executable_bit) {
         var published_file = try std.fs.cwd().openFile(published, .{});
@@ -491,4 +522,24 @@ test "atomicPublish allows multiple builds under releases namespace" {
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings("releases/build-b", release_rel);
+    const outputs_val = root.get("outputs") orelse return error.TestUnexpectedResult;
+    const outputs = switch (outputs_val) {
+        .array => |arr| arr,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), outputs.items.len);
+    const first_output = switch (outputs.items[0]) {
+        .object => |obj| obj,
+        else => return error.TestUnexpectedResult,
+    };
+    const size_val = switch (first_output.get("size") orelse return error.TestUnexpectedResult) {
+        .integer => |n| n,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(i64, 11), size_val);
+    const mode_val = switch (first_output.get("mode") orelse return error.TestUnexpectedResult) {
+        .string => |str| str,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("0755", mode_val);
 }
