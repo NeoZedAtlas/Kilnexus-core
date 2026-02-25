@@ -70,10 +70,12 @@ pub const WorkspaceMountSpec = struct {
     source: []u8,
     target: []u8,
     mode: u16,
+    strip_prefix: ?[]u8 = null,
 
     pub fn deinit(self: *WorkspaceMountSpec, allocator: std.mem.Allocator) void {
         allocator.free(self.source);
         allocator.free(self.target);
+        if (self.strip_prefix) |strip_prefix| allocator.free(strip_prefix);
         self.* = undefined;
     }
 };
@@ -986,11 +988,20 @@ fn parseWorkspaceMounts(
         errdefer allocator.free(source);
         const target = try allocator.dupe(u8, normalized_target);
         errdefer allocator.free(target);
+        const strip_prefix = if (obj.get("strip_prefix")) |strip_value| blk: {
+            const strip_text = try expectString(strip_value, "strip_prefix");
+            if (strip_text.len == 0) return error.ValueInvalid;
+            const normalized_strip = trimTrailingSlash(strip_text);
+            try validateWorkspaceRelativePath(normalized_strip);
+            break :blk try allocator.dupe(u8, normalized_strip);
+        } else null;
+        errdefer if (strip_prefix) |value| allocator.free(value);
 
         try mounts.append(allocator, .{
             .source = source,
             .target = target,
             .mode = mode,
+            .strip_prefix = strip_prefix,
         });
     }
 }
@@ -1536,6 +1547,52 @@ test "parseWorkspaceSpec requires remote tree_root when extract is true" {
     ;
 
     try std.testing.expectError(error.MissingRequiredField, parseWorkspaceSpec(allocator, json));
+}
+
+test "parseWorkspaceSpec parses workspace mount strip_prefix" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "target": "x86_64-unknown-linux-musl",
+        \\  "toolchain": {
+        \\    "id": "zigcc-0.14.0",
+        \\    "blob_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\    "tree_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\    "size": 1
+        \\  },
+        \\  "policy": {
+        \\    "network": "off",
+        \\    "clock": "fixed"
+        \\  },
+        \\  "env": {
+        \\    "TZ": "UTC",
+        \\    "LANG": "C",
+        \\    "SOURCE_DATE_EPOCH": "1735689600"
+        \\  },
+        \\  "workspace": {
+        \\    "mounts": [
+        \\      {
+        \\        "source": "local-src",
+        \\        "target": "src",
+        \\        "mode": "0444",
+        \\        "strip_prefix": "examples/project"
+        \\      }
+        \\    ]
+        \\  },
+        \\  "outputs": [
+        \\    { "path": "kilnexus-out/app", "mode": "0755" }
+        \\  ]
+        \\}
+    ;
+
+    var spec = try parseWorkspaceSpec(allocator, json);
+    defer spec.deinit(allocator);
+
+    try std.testing.expect(spec.mounts != null);
+    try std.testing.expectEqual(@as(usize, 1), spec.mounts.?.len);
+    try std.testing.expect(spec.mounts.?[0].strip_prefix != null);
+    try std.testing.expectEqualStrings("examples/project", spec.mounts.?[0].strip_prefix.?);
 }
 
 test "parseOutputSpec parses output entries" {

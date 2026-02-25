@@ -89,6 +89,7 @@ pub fn planWorkspace(
                 defer freeOwnedStrings(allocator, files);
 
                 if (source_ref.sub_path) |sub_path| {
+                    if (mount.strip_prefix != null) return error.InvalidBuildGraph;
                     if (!containsString(files, sub_path)) return error.FileNotFound;
                     const source_abs_path = try std.fs.cwd().realpathAlloc(allocator, sub_path);
                     errdefer allocator.free(source_abs_path);
@@ -99,7 +100,9 @@ pub fn planWorkspace(
                     for (files) |rel_path| {
                         const source_abs_path = try std.fs.cwd().realpathAlloc(allocator, rel_path);
                         errdefer allocator.free(source_abs_path);
-                        const mount_path = try joinPosix(allocator, mount.target, rel_path);
+                        const projected_rel = try applyMountStripPrefix(allocator, rel_path, mount.strip_prefix);
+                        defer allocator.free(projected_rel);
+                        const mount_path = try joinPosix(allocator, mount.target, projected_rel);
                         errdefer allocator.free(mount_path);
                         try appendMappingChecked(allocator, &mappings, &seen_mounts, mount_path, source_abs_path, false);
                     }
@@ -745,6 +748,7 @@ fn appendRemoteMappingsForMount(
     remote: RemotePrepared,
 ) !void {
     if (!remote.is_tree) {
+        if (mount.strip_prefix != null) return error.InvalidBuildGraph;
         if (source_ref.sub_path != null) return error.InvalidBuildGraph;
         const mount_path = try allocator.dupe(u8, mount.target);
         errdefer allocator.free(mount_path);
@@ -765,6 +769,7 @@ fn appendRemoteMappingsForMount(
     defer allocator.free(selected_root_abs);
 
     if (try pathIsFile(selected_root_abs)) {
+        if (mount.strip_prefix != null) return error.InvalidBuildGraph;
         const mount_path = try allocator.dupe(u8, mount.target);
         errdefer allocator.free(mount_path);
         const source_abs = try allocator.dupe(u8, selected_root_abs);
@@ -783,7 +788,9 @@ fn appendRemoteMappingsForMount(
         const source_abs_real = try std.fs.cwd().realpathAlloc(allocator, source_abs);
         allocator.free(source_abs);
         errdefer allocator.free(source_abs_real);
-        const mount_path = try joinPosix(allocator, mount.target, rel);
+        const projected_rel = try applyMountStripPrefix(allocator, rel, mount.strip_prefix);
+        defer allocator.free(projected_rel);
+        const mount_path = try joinPosix(allocator, mount.target, projected_rel);
         errdefer allocator.free(mount_path);
         try appendMappingChecked(allocator, mappings, seen_mounts, mount_path, source_abs_real, true);
     }
@@ -830,6 +837,23 @@ fn listFilesRelativeTo(allocator: std.mem.Allocator, root_abs: []const u8) ![][]
         }
     }.lessThan);
     return files.toOwnedSlice(allocator);
+}
+
+fn applyMountStripPrefix(
+    allocator: std.mem.Allocator,
+    rel_path: []const u8,
+    strip_prefix_opt: ?[]u8,
+) ![]u8 {
+    const strip_prefix = strip_prefix_opt orelse return allocator.dupe(u8, rel_path);
+    if (std.mem.eql(u8, rel_path, strip_prefix)) return error.InvalidBuildGraph;
+    if (!std.mem.startsWith(u8, rel_path, strip_prefix)) return error.InvalidBuildGraph;
+    if (rel_path.len <= strip_prefix.len or rel_path[strip_prefix.len] != '/') {
+        return error.InvalidBuildGraph;
+    }
+    const trimmed = rel_path[strip_prefix.len + 1 ..];
+    if (trimmed.len == 0) return error.InvalidBuildGraph;
+    try validateMountPath(trimmed);
+    return allocator.dupe(u8, trimmed);
 }
 
 fn expandLocalInputMatches(allocator: std.mem.Allocator, input: validator.LocalInputSpec) ![][]u8 {
@@ -1451,6 +1475,112 @@ test "planWorkspace rejects remote extract when tree_root mismatches" {
     defer spec.deinit(allocator);
 
     try std.testing.expectError(error.TreeRootMismatch, planWorkspace(allocator, &spec, .{
+        .cache_root = cache_root,
+    }));
+}
+
+test "planWorkspace applies strip_prefix for local directory mount projection" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project/src");
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/src/a.c",
+        .data = "int a;\n",
+    });
+
+    const sub = tmp.sub_path[0..];
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/src/*.c", .{sub});
+    defer allocator.free(include_pat);
+    const strip_prefix = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project", .{sub});
+    defer allocator.free(strip_prefix);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{sub});
+    defer allocator.free(cache_root);
+
+    var locals = try allocator.alloc(validator.LocalInputSpec, 1);
+    locals[0] = .{
+        .id = try allocator.dupe(u8, "local-src"),
+        .include = blk: {
+            var arr = try allocator.alloc([]u8, 1);
+            arr[0] = try allocator.dupe(u8, include_pat);
+            break :blk arr;
+        },
+        .exclude = try allocator.alloc([]u8, 0),
+    };
+    var mounts = try allocator.alloc(validator.WorkspaceMountSpec, 1);
+    mounts[0] = .{
+        .source = try allocator.dupe(u8, "local-src"),
+        .target = try allocator.dupe(u8, "mirror"),
+        .mode = 0o444,
+        .strip_prefix = try allocator.dupe(u8, strip_prefix),
+    };
+    var spec: validator.WorkspaceSpec = .{
+        .entries = try allocator.alloc(validator.WorkspaceEntry, 0),
+        .local_inputs = locals,
+        .mounts = mounts,
+    };
+    defer spec.deinit(allocator);
+
+    var plan = try planWorkspace(allocator, &spec, .{
+        .cache_root = cache_root,
+    });
+    defer plan.deinit(allocator);
+
+    const workspace_root = try projectWorkspace(allocator, &plan, "strip-prefix-local", .{
+        .cache_root = cache_root,
+    });
+    defer allocator.free(workspace_root);
+
+    const projected = try std.fs.path.join(allocator, &.{ workspace_root, "mirror/src/a.c" });
+    defer allocator.free(projected);
+    const bytes = try std.fs.cwd().readFileAlloc(allocator, projected, 1024);
+    defer allocator.free(bytes);
+    try std.testing.expectEqualStrings("int a;\n", bytes);
+}
+
+test "planWorkspace rejects mount when strip_prefix does not match projected file path" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project/src");
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/src/a.c",
+        .data = "int a;\n",
+    });
+
+    const sub = tmp.sub_path[0..];
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/project/src/*.c", .{sub});
+    defer allocator.free(include_pat);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{sub});
+    defer allocator.free(cache_root);
+
+    var locals = try allocator.alloc(validator.LocalInputSpec, 1);
+    locals[0] = .{
+        .id = try allocator.dupe(u8, "local-src"),
+        .include = blk: {
+            var arr = try allocator.alloc([]u8, 1);
+            arr[0] = try allocator.dupe(u8, include_pat);
+            break :blk arr;
+        },
+        .exclude = try allocator.alloc([]u8, 0),
+    };
+    var mounts = try allocator.alloc(validator.WorkspaceMountSpec, 1);
+    mounts[0] = .{
+        .source = try allocator.dupe(u8, "local-src"),
+        .target = try allocator.dupe(u8, "mirror"),
+        .mode = 0o444,
+        .strip_prefix = try allocator.dupe(u8, "does/not/match"),
+    };
+    var spec: validator.WorkspaceSpec = .{
+        .entries = try allocator.alloc(validator.WorkspaceEntry, 0),
+        .local_inputs = locals,
+        .mounts = mounts,
+    };
+    defer spec.deinit(allocator);
+
+    try std.testing.expectError(error.InvalidBuildGraph, planWorkspace(allocator, &spec, .{
         .cache_root = cache_root,
     }));
 }
