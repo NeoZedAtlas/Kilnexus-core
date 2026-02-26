@@ -1,5 +1,6 @@
 const std = @import("std");
 const kx_error = @import("../../errors/kx_error.zig");
+const boundary_map = @import("../../errors/boundary_map.zig");
 const state_types = @import("types.zig");
 const state_errors = @import("errors.zig");
 const state_runner = @import("runner.zig");
@@ -37,7 +38,7 @@ pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options:
 
 pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) RunAttempt {
     const source = std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes) catch |err| {
-        const cause = kx_error.normalizeIo(err);
+        const cause = boundary_map.mapIo(err);
         return .{
             .failure = .{
                 .at = .init,
@@ -53,7 +54,7 @@ pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const
 pub fn attemptRunWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) RunAttempt {
     var failed_at: State = .init;
     const result = state_runner.runWithOptionsCore(allocator, source, options, &failed_at) catch |err| {
-        const cause = state_errors.normalizeCauseByState(failed_at, err);
+        const cause = state_errors.translateCauseByState(failed_at, err);
         return .{
             .failure = .{
                 .at = failed_at,
