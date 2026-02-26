@@ -2,16 +2,9 @@ const std = @import("std");
 const parse_errors = @import("../parser/parse_errors.zig");
 const mini_tuf = @import("../trust/mini_tuf.zig");
 const error_names = @import("error_names.zig");
+const code_catalog = @import("code_catalog.zig");
 
-pub const Family = enum {
-    parse,
-    trust,
-    io,
-    integrity,
-    build,
-    publish,
-    internal,
-};
+pub const Family = code_catalog.Family;
 
 pub const Code = enum(u32) {
     KX_OK = 0,
@@ -74,10 +67,7 @@ pub const Code = enum(u32) {
     KX_INTERNAL = 9000,
 };
 
-pub const Descriptor = struct {
-    family: Family,
-    summary: []const u8,
-};
+pub const Descriptor = code_catalog.Descriptor;
 
 pub const IntegrityError = error{
     BlobMismatch,
@@ -119,65 +109,7 @@ pub const IoError = error{
 };
 
 pub fn describe(code: Code) Descriptor {
-    return switch (code) {
-        .KX_OK => .{ .family = .internal, .summary = "ok" },
-        .KX_PARSE_SYNTAX => .{ .family = .parse, .summary = "invalid syntax in lockfile" },
-        .KX_PARSE_SCHEMA => .{ .family = .parse, .summary = "lockfile schema validation failed" },
-        .KX_PARSE_CANONICAL => .{ .family = .parse, .summary = "lockfile canonicalization failed" },
-        .KX_PARSE_EMPTY_INPUT => .{ .family = .parse, .summary = "lockfile is empty or whitespace only" },
-        .KX_PARSE_MISSING_FIELD => .{ .family = .parse, .summary = "required lockfile field missing" },
-        .KX_PARSE_TYPE_MISMATCH => .{ .family = .parse, .summary = "lockfile field type mismatch" },
-        .KX_PARSE_VALUE_INVALID => .{ .family = .parse, .summary = "lockfile field value invalid" },
-        .KX_PARSE_VERSION_UNSUPPORTED => .{ .family = .parse, .summary = "lockfile version unsupported" },
-        .KX_PARSE_OPERATOR_DISALLOWED => .{ .family = .parse, .summary = "lockfile contains disallowed operator" },
-        .KX_PARSE_OUTPUT_INVALID => .{ .family = .parse, .summary = "lockfile output mapping invalid" },
-        .KX_PARSE_LEGACY_BUILD_BLOCK => .{ .family = .parse, .summary = "legacy build block is disallowed; use operators" },
-
-        .KX_TRUST_METADATA_MISSING => .{ .family = .trust, .summary = "required trust metadata missing" },
-        .KX_TRUST_METADATA_MALFORMED => .{ .family = .trust, .summary = "trust metadata JSON is malformed or missing required fields" },
-        .KX_TRUST_ROLE_POLICY => .{ .family = .trust, .summary = "trust role policy is invalid" },
-        .KX_TRUST_KEY_UNSUPPORTED => .{ .family = .trust, .summary = "trust key type or signature scheme is unsupported" },
-        .KX_TRUST_SIGNATURE_INVALID => .{ .family = .trust, .summary = "trust signature verification failed" },
-        .KX_TRUST_SIGNATURE_THRESHOLD => .{ .family = .trust, .summary = "trust signature threshold not met" },
-        .KX_TRUST_METADATA_EXPIRED => .{ .family = .trust, .summary = "trust metadata expired or has invalid expiry timestamp" },
-        .KX_TRUST_ROLLBACK => .{ .family = .trust, .summary = "rollback detected in trust metadata versions" },
-        .KX_TRUST_VERSION_LINK => .{ .family = .trust, .summary = "metadata version link mismatch" },
-        .KX_TRUST_VERSION_INVALID => .{ .family = .trust, .summary = "metadata version is invalid" },
-        .KX_TRUST_STATE_IO => .{ .family = .trust, .summary = "trust state persistence IO failed" },
-        .KX_TRUST_STATE_INVALID => .{ .family = .trust, .summary = "trust state file is malformed or invalid" },
-
-        .KX_IO_NOT_FOUND => .{ .family = .io, .summary = "path or file not found" },
-        .KX_IO_ACCESS_DENIED => .{ .family = .io, .summary = "access denied for filesystem operation" },
-        .KX_IO_PATH_INVALID => .{ .family = .io, .summary = "path is invalid for filesystem operation" },
-        .KX_IO_READ_FAILED => .{ .family = .io, .summary = "file read failed" },
-        .KX_IO_WRITE_FAILED => .{ .family = .io, .summary = "file write failed" },
-        .KX_IO_NO_SPACE => .{ .family = .io, .summary = "no space or disk quota left" },
-        .KX_IO_RENAME_FAILED => .{ .family = .io, .summary = "atomic rename failed" },
-        .KX_IO_ALREADY_EXISTS => .{ .family = .io, .summary = "target path already exists" },
-
-        .KX_INTEGRITY_BLOB_MISMATCH => .{ .family = .integrity, .summary = "blob integrity mismatch" },
-        .KX_INTEGRITY_TREE_MISMATCH => .{ .family = .integrity, .summary = "tree integrity mismatch" },
-        .KX_INTEGRITY_SIZE_MISMATCH => .{ .family = .integrity, .summary = "content size mismatch" },
-        .KX_INTEGRITY_HASH_UNSUPPORTED => .{ .family = .integrity, .summary = "unsupported hash algorithm in metadata" },
-        .KX_INTEGRITY_PATH_TRAVERSAL => .{ .family = .integrity, .summary = "path traversal detected while unpacking" },
-        .KX_INTEGRITY_SYMLINK_POLICY => .{ .family = .integrity, .summary = "symlink policy violation in unpacked tree" },
-
-        .KX_BUILD_OPERATOR_FAILED => .{ .family = .build, .summary = "build operator failed" },
-        .KX_BUILD_OPERATOR_DISALLOWED => .{ .family = .build, .summary = "operator is disallowed by policy" },
-        .KX_BUILD_TOOLCHAIN_MISSING => .{ .family = .build, .summary = "required toolchain not available" },
-        .KX_BUILD_SANDBOX_VIOLATION => .{ .family = .build, .summary = "sandbox policy violation during build" },
-        .KX_BUILD_GRAPH_INVALID => .{ .family = .build, .summary = "build graph is invalid" },
-        .KX_BUILD_TIMEOUT => .{ .family = .build, .summary = "build step timeout exceeded" },
-        .KX_BUILD_NOT_IMPLEMENTED => .{ .family = .build, .summary = "build feature is not implemented in current MVP" },
-
-        .KX_PUBLISH_ATOMIC => .{ .family = .publish, .summary = "atomic publish failed" },
-        .KX_PUBLISH_OUTPUT_MISSING => .{ .family = .publish, .summary = "declared output missing at publish boundary" },
-        .KX_PUBLISH_OUTPUT_HASH_MISMATCH => .{ .family = .publish, .summary = "published output hash mismatch" },
-        .KX_PUBLISH_FSYNC_FAILED => .{ .family = .publish, .summary = "fsync failed before publish" },
-        .KX_PUBLISH_PERMISSION => .{ .family = .publish, .summary = "publish path permission failure" },
-
-        .KX_INTERNAL => .{ .family = .internal, .summary = "internal error" },
-    };
+    return code_catalog.describeByCodeValue(@intFromEnum(code));
 }
 
 pub fn buildErrorId(
@@ -318,8 +250,21 @@ fn isIgnored(comptime name: []const u8, comptime ignored: []const []const u8) bo
     return false;
 }
 
+fn assertCatalogCoverage() void {
+    inline for (@typeInfo(Code).@"enum".fields) |field| {
+        const code_value: u32 = @intCast(field.value);
+        if (!code_catalog.hasCodeValue(code_value)) {
+            @compileError(std.fmt.comptimePrint(
+                "No descriptor catalog entry for Code.{s} ({d})",
+                .{ field.name, code_value },
+            ));
+        }
+    }
+}
+
 comptime {
     @setEvalBranchQuota(50_000);
+    assertCatalogCoverage();
     assertConventionCoverage(mini_tuf.TrustError, trust_convention, &.{"Internal"});
     assertConventionCoverage(parse_errors.ParseError, parse_convention, &.{"Internal"});
     assertConventionCoverage(IoError, io_convention, &.{"Internal"});
