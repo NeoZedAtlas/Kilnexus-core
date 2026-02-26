@@ -5,6 +5,7 @@ const parse_json_only = @import("args/parse_json_only.zig");
 const parse_cache = @import("args/parse_cache.zig");
 const parse_toolchain = @import("args/parse_toolchain.zig");
 const parse_doctor = @import("args/parse_doctor.zig");
+const parse_clean = @import("args/parse_clean.zig");
 const common = @import("args/common.zig");
 
 pub const selectCommand = command_selection.selectCommand;
@@ -14,6 +15,7 @@ pub const parseJsonOnlyCliArgs = parse_json_only.parseJsonOnlyCliArgs;
 pub const parseCacheCliArgs = parse_cache.parseCacheCliArgs;
 pub const parseToolchainCliArgs = parse_toolchain.parseToolchainCliArgs;
 pub const parseDoctorCliArgs = parse_doctor.parseDoctorCliArgs;
+pub const parseCleanCliArgs = parse_clean.parseCleanCliArgs;
 pub const validateKnxfileCliPath = common.validateKnxfileCliPath;
 
 test {
@@ -24,5 +26,6 @@ test {
     _ = parse_cache;
     _ = parse_toolchain;
     _ = parse_doctor;
+    _ = parse_clean;
     _ = common;
 }

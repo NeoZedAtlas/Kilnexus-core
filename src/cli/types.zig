@@ -53,12 +53,50 @@ pub const DoctorCliArgs = struct {
     json_output: bool = false,
 };
 
+pub const CleanScopeSet = struct {
+    work: bool = false,
+    staging: bool = false,
+    local: bool = false,
+    third_party: bool = false,
+    official: bool = false,
+    releases: bool = false,
+
+    pub fn default() CleanScopeSet {
+        return .{
+            .work = true,
+            .staging = true,
+        };
+    }
+
+    pub fn all() CleanScopeSet {
+        return .{
+            .work = true,
+            .staging = true,
+            .local = true,
+            .third_party = true,
+            .official = true,
+            .releases = true,
+        };
+    }
+};
+
+pub const CleanCliArgs = struct {
+    cache_root: []const u8 = ".kilnexus-cache",
+    output_root: []const u8 = "kilnexus-out",
+    scopes: CleanScopeSet = CleanScopeSet.default(),
+    older_than_secs: u64 = 72 * 60 * 60,
+    toolchain_tree_root: ?[]const u8 = null,
+    apply: bool = false,
+    json_output: bool = false,
+};
+
 pub const CliCommand = enum {
     build,
     validate,
     plan,
     graph,
     doctor,
+    clean,
     cache,
     toolchain,
     version,

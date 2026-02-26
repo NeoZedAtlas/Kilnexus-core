@@ -7,6 +7,7 @@ const validate_command = @import("commands/validate_command.zig");
 const plan_command = @import("commands/plan_command.zig");
 const graph_command = @import("commands/graph_command.zig");
 const doctor_command = @import("commands/doctor_command.zig");
+const clean_command = @import("commands/clean_command.zig");
 const cache_command = @import("commands/cache_command.zig");
 const toolchain_command = @import("commands/toolchain_command.zig");
 const version_command = @import("commands/version_command.zig");
@@ -46,6 +47,7 @@ pub fn runMain() !void {
         .plan => try plan_command.run(allocator, selection.args),
         .graph => try graph_command.run(allocator, selection.args),
         .doctor => try doctor_command.run(allocator, selection.args),
+        .clean => try clean_command.run(allocator, selection.args),
         .cache => try cache_command.run(allocator, selection.args),
         .toolchain => try toolchain_command.run(allocator, selection.args),
         .version => try version_command.run(allocator, selection.args),
@@ -61,6 +63,7 @@ test {
     _ = plan_command;
     _ = graph_command;
     _ = doctor_command;
+    _ = clean_command;
     _ = cache_command;
     _ = toolchain_command;
     _ = version_command;

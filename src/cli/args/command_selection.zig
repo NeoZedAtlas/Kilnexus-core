@@ -36,6 +36,7 @@ fn isKnownCommand(token: []const u8) bool {
         std.mem.eql(u8, token, "plan") or
         std.mem.eql(u8, token, "graph") or
         std.mem.eql(u8, token, "doctor") or
+        std.mem.eql(u8, token, "clean") or
         std.mem.eql(u8, token, "cache") or
         std.mem.eql(u8, token, "toolchain") or
         std.mem.eql(u8, token, "version");
@@ -56,6 +57,9 @@ fn parseNamedCommand(token: []const u8, args: []const []const u8) !types.Command
     }
     if (std.mem.eql(u8, token, "doctor")) {
         return .{ .command = .doctor, .args = args };
+    }
+    if (std.mem.eql(u8, token, "clean")) {
+        return .{ .command = .clean, .args = args };
     }
     if (std.mem.eql(u8, token, "cache")) {
         return .{ .command = .cache, .args = args };
@@ -89,4 +93,7 @@ test "selectCommand supports knx prefix and defaults" {
     const graph_cmd = try selectCommand(&.{ "knx", "graph", "Knxfile" });
     try std.testing.expectEqual(types.CliCommand.graph, graph_cmd.command);
     try std.testing.expectEqual(@as(usize, 1), graph_cmd.args.len);
+
+    const clean_cmd = try selectCommand(&.{"clean"});
+    try std.testing.expectEqual(types.CliCommand.clean, clean_cmd.command);
 }

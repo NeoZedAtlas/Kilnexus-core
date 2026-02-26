@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn printUsage() void {
     std.debug.print(
-        "Usage: Kilnexus_core [knx] <build|validate|plan|graph|doctor|cache|toolchain|version> [args]\n",
+        "Usage: Kilnexus_core [knx] <build|validate|plan|graph|doctor|clean|cache|toolchain|version> [args]\n",
         .{},
     );
     std.debug.print("Or: Kilnexus_core [Knxfile] (defaults to build)\n", .{});
@@ -16,6 +16,7 @@ pub fn printUsage() void {
     std.debug.print("plan options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("graph options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("doctor options: --cache-root <dir> --output-root <dir> --trust-dir <dir> --trust-off --json --help\n", .{});
+    std.debug.print("clean options: --scope <csv> --older-than <Ns|Nm|Nh|Nd> --toolchain <tree_root> --cache-root <dir> --output-root <dir> --apply --dry-run --json --help\n", .{});
     std.debug.print("cache options: --cache-root <dir> --json --help\n", .{});
     std.debug.print("toolchain options: --cache-root <dir> --json --help\n", .{});
     std.debug.print("version options: --json --help\n", .{});
