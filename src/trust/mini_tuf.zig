@@ -1,4 +1,5 @@
 const std = @import("std");
+const error_names = @import("../errors/error_names.zig");
 
 pub const MetadataBundle = struct {
     root_json: []u8,
@@ -115,70 +116,15 @@ pub fn enforceRollback(previous: VerificationSummary, current: VerificationSumma
     if (current.targets_version < previous.targets_version) return error.RollbackDetected;
 }
 
-const Alias = struct {
-    from: []const u8,
-    to: []const u8,
-};
-
-const trust_aliases: []const Alias = &.{
-    .{ .from = "FileNotFound", .to = "MetadataMissing" },
-    .{ .from = "ExpectedObject", .to = "MetadataMalformed" },
-    .{ .from = "ExpectedArray", .to = "MetadataMalformed" },
-    .{ .from = "ExpectedString", .to = "MetadataMalformed" },
-    .{ .from = "ExpectedInteger", .to = "MetadataMalformed" },
-    .{ .from = "MissingRequiredField", .to = "MetadataMalformed" },
-    .{ .from = "MissingSignedSection", .to = "MetadataMalformed" },
-    .{ .from = "MissingSignaturesSection", .to = "MetadataMalformed" },
-    .{ .from = "MissingRoleRule", .to = "RolePolicyInvalid" },
-    .{ .from = "InvalidRoleType", .to = "RolePolicyInvalid" },
-    .{ .from = "InvalidThreshold", .to = "RolePolicyInvalid" },
-    .{ .from = "EmptyRoleKeyIds", .to = "RolePolicyInvalid" },
-    .{ .from = "EmptyRoleKeyId", .to = "RolePolicyInvalid" },
-    .{ .from = "InvalidSignatureEntry", .to = "RolePolicyInvalid" },
-    .{ .from = "EmptySignatures", .to = "RolePolicyInvalid" },
-    .{ .from = "UnsupportedKeyType", .to = "KeyUnsupported" },
-    .{ .from = "UnsupportedSignatureScheme", .to = "KeyUnsupported" },
-    .{ .from = "SignatureVerificationFailed", .to = "SignatureInvalid" },
-    .{ .from = "EncodingError", .to = "SignatureInvalid" },
-    .{ .from = "IdentityElement", .to = "SignatureInvalid" },
-    .{ .from = "WeakPublicKey", .to = "SignatureInvalid" },
-    .{ .from = "NonCanonical", .to = "SignatureInvalid" },
-    .{ .from = "InvalidHexLength", .to = "SignatureInvalid" },
-    .{ .from = "InvalidCharacter", .to = "SignatureInvalid" },
-    .{ .from = "InvalidTimestampFormat", .to = "MetadataExpired" },
-    .{ .from = "InvalidTimestampYear", .to = "MetadataExpired" },
-    .{ .from = "InvalidTimestampMonth", .to = "MetadataExpired" },
-    .{ .from = "InvalidTimestampDay", .to = "MetadataExpired" },
-    .{ .from = "InvalidTimestampClock", .to = "MetadataExpired" },
-    .{ .from = "LinkedMetadataVersionMismatch", .to = "VersionLinkMismatch" },
-    .{ .from = "InvalidLinkedVersion", .to = "VersionLinkMismatch" },
-    .{ .from = "MissingLinkedMetadata", .to = "VersionLinkMismatch" },
-    .{ .from = "InvalidMetadataVersion", .to = "VersionInvalid" },
-    .{ .from = "InvalidStateVersion", .to = "StateInvalid" },
-    .{ .from = "AccessDenied", .to = "StateIo" },
-    .{ .from = "PermissionDenied", .to = "StateIo" },
-    .{ .from = "ReadOnlyFileSystem", .to = "StateIo" },
-    .{ .from = "NoSpaceLeft", .to = "StateIo" },
-    .{ .from = "DiskQuota", .to = "StateIo" },
-    .{ .from = "FileBusy", .to = "StateIo" },
-    .{ .from = "InputOutput", .to = "StateIo" },
-    .{ .from = "RenameAcrossMountPoints", .to = "StateIo" },
-};
+const Alias = error_names.Alias;
 
 pub fn normalizeErrorName(err_name: []const u8) TrustError {
-    return normalizeTo(TrustError, err_name, trust_aliases);
+    return normalizeTo(TrustError, err_name, error_names.trust_aliases);
 }
 
 fn normalizeTo(comptime Target: type, err_name: []const u8, comptime aliases: []const Alias) Target {
-    const resolved = resolveAliasName(err_name, aliases);
+    const resolved = error_names.resolveAlias(err_name, aliases);
     return errorFromName(Target, resolved) orelse error.Internal;
-}
-
-fn resolveAliasName(name: []const u8, comptime aliases: []const Alias) []const u8 {
-    inline for (aliases) |alias| {
-        if (std.mem.eql(u8, name, alias.from)) return alias.to;
-    }
-    return name;
 }
 
 fn errorFromName(comptime Target: type, name: []const u8) ?Target {
