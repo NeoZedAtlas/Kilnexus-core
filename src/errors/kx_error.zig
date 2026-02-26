@@ -109,14 +109,11 @@ pub const PublishError = error{
 };
 
 pub const IoError = error{
-    IoNotFound,
-    IoAccessDenied,
-    IoPathInvalid,
-    IoReadFailed,
-    IoWriteFailed,
-    IoNoSpace,
-    IoRenameFailed,
-    IoAlreadyExists,
+    Unavailable,
+    Denied,
+    PathInvalid,
+    ReadFailed,
+    WriteFailed,
     Internal,
 };
 
@@ -225,7 +222,10 @@ const parse_convention = Convention{
 
 const io_convention = Convention{
     .family = "IO",
-    .strip_prefix = "Io",
+    .aliases = &.{
+        .{ .from = "Unavailable", .to = "NotFound" },
+        .{ .from = "Denied", .to = "AccessDenied" },
+    },
 };
 
 const integrity_convention = Convention{
@@ -374,9 +374,10 @@ test "buildErrorId is stable" {
     try std.testing.expectEqualStrings("kx:2001:load_trust_metadata:FileNotFound", id);
 }
 
-test "classifyIo maps not-found and no-space" {
-    try std.testing.expectEqual(Code.KX_IO_NOT_FOUND, classifyIo(error.IoNotFound));
-    try std.testing.expectEqual(Code.KX_IO_NO_SPACE, classifyIo(error.IoNoSpace));
+test "classifyIo maps unavailable and denied/write" {
+    try std.testing.expectEqual(Code.KX_IO_NOT_FOUND, classifyIo(error.Unavailable));
+    try std.testing.expectEqual(Code.KX_IO_ACCESS_DENIED, classifyIo(error.Denied));
+    try std.testing.expectEqual(Code.KX_IO_WRITE_FAILED, classifyIo(error.WriteFailed));
 }
 
 test "classifyIntegrity maps blob and traversal" {

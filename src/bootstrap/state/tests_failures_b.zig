@@ -56,7 +56,7 @@ test "attemptRunWithOptions fails at download when source file is missing" {
             try std.testing.expectEqual(State.download_blob, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
             try std.testing.expect(failure.cause == .io);
-            try std.testing.expectEqual(error.IoNotFound, failure.cause.io);
+            try std.testing.expectEqual(error.Unavailable, failure.cause.io);
         },
     }
 }
@@ -114,7 +114,7 @@ test "attemptRunWithOptions fails in execute stage when declared source is missi
             try std.testing.expectEqual(State.execute_build_graph, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
             try std.testing.expect(failure.cause == .io);
-            try std.testing.expectEqual(error.IoNotFound, failure.cause.io);
+            try std.testing.expectEqual(error.Unavailable, failure.cause.io);
         },
     }
 }

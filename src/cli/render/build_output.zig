@@ -171,7 +171,7 @@ test "buildFailureJsonLine renders stable failure payload" {
     const failure: bootstrap.RunFailure = .{
         .at = .init,
         .code = .KX_IO_NOT_FOUND,
-        .cause = .{ .io = error.IoNotFound },
+        .cause = .{ .io = error.Unavailable },
     };
 
     const line = try buildFailureJsonLine(allocator, failure);

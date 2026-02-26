@@ -151,7 +151,7 @@ test "attemptRunFromPathWithOptions returns canonical io cause for missing input
             try std.testing.expectEqual(State.init, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
             try std.testing.expect(failure.cause == .io);
-            try std.testing.expectEqual(error.IoNotFound, failure.cause.io);
+            try std.testing.expectEqual(error.Unavailable, failure.cause.io);
         },
     }
 }
