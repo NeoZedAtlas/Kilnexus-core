@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const validator = @import("../knx/validator.zig");
+const error_names = @import("../errors/error_names.zig");
 
 pub const InstallOptions = struct {
     cache_root: []const u8 = ".kilnexus-cache",
@@ -356,26 +357,8 @@ fn enforceDeadline(deadline_ms: ?u64) !void {
 }
 
 fn isRetryableDownloadErrorName(err_name: []const u8) bool {
-    inline for (retryable_download_errors) |name| {
-        if (std.mem.eql(u8, err_name, name)) return true;
-    }
-    return false;
+    return error_names.isRetryableDownload(err_name);
 }
-
-const retryable_download_errors = [_][]const u8{
-    "ConnectionTimedOut",
-    "ConnectionResetByPeer",
-    "ConnectionRefused",
-    "NetworkUnreachable",
-    "TemporaryNameServerFailure",
-    "NameServerFailure",
-    "HttpHeadersInvalid",
-    "HttpHeadersOversize",
-    "HttpChunkInvalid",
-    "HttpChunkTruncated",
-    "ReadFailed",
-    "WriteFailed",
-};
 
 fn sanitizeId(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     var out = try allocator.alloc(u8, text.len);
@@ -939,17 +922,8 @@ fn tightenWindowsAcl(allocator: std.mem.Allocator, root_path: []const u8) !void 
 }
 
 fn isRetryableWindowsSealErrorName(err_name: []const u8) bool {
-    inline for (retryable_windows_seal_errors) |name| {
-        if (std.mem.eql(u8, err_name, name)) return true;
-    }
-    return false;
+    return error_names.isRetryableWindowsSeal(err_name);
 }
-
-const retryable_windows_seal_errors = [_][]const u8{
-    "AccessDenied",
-    "PermissionDenied",
-    "FileBusy",
-};
 
 fn resolveIcaclsPath(allocator: std.mem.Allocator) ![]u8 {
     const win_dir = std.process.getEnvVarOwned(allocator, "WINDIR") catch {

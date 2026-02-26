@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const validator = @import("../../knx/validator.zig");
+const error_names = @import("../../errors/error_names.zig");
 const workspace_types = @import("types.zig");
 const tree_hash = @import("tree_hash.zig");
 
@@ -420,26 +421,8 @@ fn enforceDeadline(deadline_ms: ?u64) !void {
 }
 
 fn isRetryableDownloadErrorName(err_name: []const u8) bool {
-    inline for (retryable_download_errors) |name| {
-        if (std.mem.eql(u8, err_name, name)) return true;
-    }
-    return false;
+    return error_names.isRetryableDownload(err_name);
 }
-
-const retryable_download_errors = [_][]const u8{
-    "ConnectionTimedOut",
-    "ConnectionResetByPeer",
-    "ConnectionRefused",
-    "NetworkUnreachable",
-    "TemporaryNameServerFailure",
-    "NameServerFailure",
-    "HttpHeadersInvalid",
-    "HttpHeadersOversize",
-    "HttpChunkInvalid",
-    "HttpChunkTruncated",
-    "ReadFailed",
-    "WriteFailed",
-};
 
 fn mapHttpStatusToError(status: std.http.Status) HttpStatusError {
     return switch (status) {

@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const error_names = @import("../../errors/error_names.zig");
 const workspace_types = @import("types.zig");
 
 const LinkMode = workspace_types.LinkMode;
@@ -67,20 +68,8 @@ fn projectWindows(source_abs_path: []const u8, target_path: []const u8, link_mod
 }
 
 fn shouldFallbackToSymlinkName(err_name: []const u8) bool {
-    inline for (symlink_fallback_errors) |name| {
-        if (std.mem.eql(u8, err_name, name)) return true;
-    }
-    return false;
+    return error_names.isSymlinkFallback(err_name);
 }
-
-const symlink_fallback_errors = [_][]const u8{
-    "NotSameFileSystem",
-    "AccessDenied",
-    "PermissionDenied",
-    "FileSystem",
-    "ReadOnlyFileSystem",
-    "LinkQuotaExceeded",
-};
 
 fn pathIsDirectory(path: []const u8) !bool {
     var dir = std.fs.cwd().openDir(path, .{}) catch |err| switch (err) {
