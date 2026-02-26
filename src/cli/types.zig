@@ -86,6 +86,9 @@ pub const CleanCliArgs = struct {
     scopes: CleanScopeSet = CleanScopeSet.default(),
     older_than_secs: u64 = 72 * 60 * 60,
     toolchain_tree_root: ?[]const u8 = null,
+    toolchain_prune: bool = false,
+    keep_last: usize = 1,
+    official_max_bytes: ?u64 = null,
     apply: bool = false,
     json_output: bool = false,
 };

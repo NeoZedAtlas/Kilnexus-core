@@ -16,7 +16,7 @@ pub fn printUsage() void {
     std.debug.print("plan options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("graph options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("doctor options: --cache-root <dir> --output-root <dir> --trust-dir <dir> --trust-off --json --help\n", .{});
-    std.debug.print("clean options: --scope <csv> --older-than <Ns|Nm|Nh|Nd> --toolchain <tree_root> --cache-root <dir> --output-root <dir> --apply --dry-run --json --help\n", .{});
+    std.debug.print("clean options: --scope <csv> --older-than <Ns|Nm|Nh|Nd> --toolchain <tree_root> --toolchain-prune --keep-last <N> --official-max-bytes <N|NKB|NMB|NGB> --cache-root <dir> --output-root <dir> --apply --dry-run --json --help\n", .{});
     std.debug.print("cache options: --cache-root <dir> --json --help\n", .{});
     std.debug.print("toolchain options: --cache-root <dir> --json --help\n", .{});
     std.debug.print("version options: --json --help\n", .{});

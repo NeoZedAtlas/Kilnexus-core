@@ -19,6 +19,9 @@ pub const CleanOptions = struct {
     scopes: cli_types.CleanScopeSet,
     older_than_secs: u64,
     toolchain_tree_root: ?[]const u8,
+    toolchain_prune: bool,
+    keep_last: usize,
+    official_max_bytes: ?u64,
     apply: bool,
 };
 
@@ -40,6 +43,19 @@ const Candidate = struct {
     bytes: u64,
 
     fn deinit(self: *Candidate, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.* = undefined;
+    }
+};
+
+const ToolchainTreeEntry = struct {
+    tree_root: []u8,
+    path: []u8,
+    mtime_secs: i64,
+    bytes: u64,
+
+    fn deinit(self: *ToolchainTreeEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.tree_root);
         allocator.free(self.path);
         self.* = undefined;
     }
@@ -110,6 +126,9 @@ pub fn runClean(allocator: std.mem.Allocator, options: CleanOptions) !CleanRepor
     }
     if (options.toolchain_tree_root) |tree_root| {
         try addExplicitToolchainCandidate(allocator, &candidates, options.cache_root, tree_root);
+    }
+    if (options.toolchain_prune or options.official_max_bytes != null) {
+        try addAutomaticToolchainGcCandidates(allocator, &candidates, options, threshold_secs, &refs);
     }
 
     var seen_paths: std.StringHashMap(void) = .init(allocator);
@@ -196,6 +215,143 @@ fn addExplicitToolchainCandidate(
         .is_dir = true,
         .bytes = bytes,
     });
+}
+
+fn addAutomaticToolchainGcCandidates(
+    allocator: std.mem.Allocator,
+    candidates: *std.ArrayList(Candidate),
+    options: CleanOptions,
+    threshold_secs: i64,
+    refs: *const CurrentRefs,
+) !void {
+    var entries = try listOfficialToolchainTrees(allocator, options.cache_root, threshold_secs);
+    defer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    if (entries.items.len == 0) return;
+
+    std.mem.sort(ToolchainTreeEntry, entries.items, {}, lessByNewestMtime);
+
+    var kept: std.ArrayList(bool) = try std.ArrayList(bool).initCapacity(allocator, entries.items.len);
+    defer kept.deinit(allocator);
+    try kept.resize(allocator, entries.items.len);
+    @memset(kept.items, false);
+
+    if (refs.toolchain_tree_root) |current_tree_root| {
+        for (entries.items, 0..) |entry, idx| {
+            if (std.mem.eql(u8, entry.tree_root, current_tree_root)) {
+                kept.items[idx] = true;
+            }
+        }
+    }
+
+    var keep_budget = options.keep_last;
+    for (entries.items, 0..) |_, idx| {
+        if (keep_budget == 0) break;
+        if (kept.items[idx]) continue;
+        kept.items[idx] = true;
+        keep_budget -= 1;
+    }
+
+    if (options.toolchain_prune) {
+        for (entries.items, 0..) |entry, idx| {
+            if (kept.items[idx]) continue;
+            try candidates.append(allocator, .{
+                .path = try allocator.dupe(u8, entry.path),
+                .scope = .toolchain,
+                .is_dir = true,
+                .bytes = entry.bytes,
+            });
+        }
+    }
+
+    if (options.official_max_bytes) |max_bytes| {
+        var total_bytes: u64 = 0;
+        for (entries.items) |entry| total_bytes += entry.bytes;
+        if (total_bytes <= max_bytes) return;
+
+        var oldest: std.ArrayList(usize) = .empty;
+        defer oldest.deinit(allocator);
+        for (entries.items, 0..) |_, idx| {
+            if (!kept.items[idx]) try oldest.append(allocator, idx);
+        }
+        std.mem.sort(usize, oldest.items, entries.items, lessIndexByOldestMtime);
+
+        for (oldest.items) |idx| {
+            if (total_bytes <= max_bytes) break;
+            const entry = entries.items[idx];
+            try candidates.append(allocator, .{
+                .path = try allocator.dupe(u8, entry.path),
+                .scope = .toolchain,
+                .is_dir = true,
+                .bytes = entry.bytes,
+            });
+            total_bytes = if (entry.bytes > total_bytes) 0 else total_bytes - entry.bytes;
+        }
+    }
+}
+
+fn listOfficialToolchainTrees(allocator: std.mem.Allocator, cache_root: []const u8, threshold_secs: i64) !std.ArrayList(ToolchainTreeEntry) {
+    var entries: std.ArrayList(ToolchainTreeEntry) = .empty;
+    errdefer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit(allocator);
+    }
+
+    const base = try std.fs.path.join(allocator, &.{ cache_root, "cas", "official", "tree" });
+    defer allocator.free(base);
+
+    var dir = std.fs.cwd().openDir(base, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return entries,
+        else => return err,
+    };
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind != .directory) continue;
+        if (entry.name.len != 64) continue;
+        if (!isHex64(entry.name)) continue;
+
+        const path = try std.fs.path.join(allocator, &.{ base, entry.name });
+        errdefer allocator.free(path);
+        const mtime_secs = try getPathMtimeSeconds(path, true);
+        if (mtime_secs > threshold_secs) {
+            allocator.free(path);
+            continue;
+        }
+        const bytes = try computePathBytes(allocator, path, true);
+        try entries.append(allocator, .{
+            .tree_root = try allocator.dupe(u8, entry.name),
+            .path = path,
+            .mtime_secs = mtime_secs,
+            .bytes = bytes,
+        });
+    }
+
+    return entries;
+}
+
+fn isHex64(text: []const u8) bool {
+    if (text.len != 64) return false;
+    for (text) |ch| {
+        if (!std.ascii.isHex(ch)) return false;
+    }
+    return true;
+}
+
+fn lessByNewestMtime(_: void, a: ToolchainTreeEntry, b: ToolchainTreeEntry) bool {
+    if (a.mtime_secs == b.mtime_secs) return std.mem.lessThan(u8, a.tree_root, b.tree_root);
+    return a.mtime_secs > b.mtime_secs;
+}
+
+fn lessIndexByOldestMtime(entries: []const ToolchainTreeEntry, a: usize, b: usize) bool {
+    const ea = entries[a];
+    const eb = entries[b];
+    if (ea.mtime_secs == eb.mtime_secs) return std.mem.lessThan(u8, ea.tree_root, eb.tree_root);
+    return ea.mtime_secs < eb.mtime_secs;
 }
 
 fn addDirectChildren(

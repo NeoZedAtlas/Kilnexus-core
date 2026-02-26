@@ -37,6 +37,20 @@ pub fn parseCleanCliArgs(args: []const []const u8) !types.CleanCliArgs {
             output.toolchain_tree_root = value;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--toolchain-prune")) {
+            output.toolchain_prune = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--keep-last")) {
+            const value = try common.nextOptionValue(args, &i);
+            output.keep_last = std.fmt.parseUnsigned(usize, value, 10) catch return error.InvalidCommand;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--official-max-bytes")) {
+            const value = try common.nextOptionValue(args, &i);
+            output.official_max_bytes = try parseByteSize(value);
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--older-than")) {
             const value = try common.nextOptionValue(args, &i);
             output.older_than_secs = try parseDurationSeconds(value);
@@ -124,6 +138,30 @@ fn parseDurationSeconds(text: []const u8) !u64 {
     return std.math.mul(u64, value, factor) catch return error.InvalidCommand;
 }
 
+fn parseByteSize(text: []const u8) !u64 {
+    if (text.len == 0) return error.InvalidCommand;
+
+    var digit_end: usize = 0;
+    while (digit_end < text.len and std.ascii.isDigit(text[digit_end])) : (digit_end += 1) {}
+    if (digit_end == 0) return error.InvalidCommand;
+
+    const value = std.fmt.parseUnsigned(u64, text[0..digit_end], 10) catch return error.InvalidCommand;
+    const suffix = text[digit_end..];
+
+    const factor: u64 = if (suffix.len == 0 or std.ascii.eqlIgnoreCase(suffix, "b"))
+        1
+    else if (std.ascii.eqlIgnoreCase(suffix, "k") or std.ascii.eqlIgnoreCase(suffix, "kb"))
+        1024
+    else if (std.ascii.eqlIgnoreCase(suffix, "m") or std.ascii.eqlIgnoreCase(suffix, "mb"))
+        1024 * 1024
+    else if (std.ascii.eqlIgnoreCase(suffix, "g") or std.ascii.eqlIgnoreCase(suffix, "gb"))
+        1024 * 1024 * 1024
+    else
+        return error.InvalidCommand;
+
+    return std.math.mul(u64, value, factor) catch return error.InvalidCommand;
+}
+
 test "parseCleanCliArgs defaults to dry-run and safe scopes" {
     const cli = try parseCleanCliArgs(&.{});
     try std.testing.expect(!cli.apply);
@@ -142,6 +180,11 @@ test "parseCleanCliArgs parses explicit scope and apply" {
         "7d",
         "--toolchain",
         "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc",
+        "--toolchain-prune",
+        "--keep-last",
+        "2",
+        "--official-max-bytes",
+        "3GB",
         "--json",
     });
     try std.testing.expect(cli.apply);
@@ -150,6 +193,10 @@ test "parseCleanCliArgs parses explicit scope and apply" {
     try std.testing.expect(!cli.scopes.work);
     try std.testing.expectEqual(@as(u64, 7 * 24 * 60 * 60), cli.older_than_secs);
     try std.testing.expect(cli.toolchain_tree_root != null);
+    try std.testing.expect(cli.toolchain_prune);
+    try std.testing.expectEqual(@as(usize, 2), cli.keep_last);
+    try std.testing.expect(cli.official_max_bytes != null);
+    try std.testing.expectEqual(@as(u64, 3 * 1024 * 1024 * 1024), cli.official_max_bytes.?);
     try std.testing.expect(cli.json_output);
 }
 
