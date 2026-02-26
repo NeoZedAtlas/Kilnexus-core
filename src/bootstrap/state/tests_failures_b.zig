@@ -55,7 +55,8 @@ test "attemptRunWithOptions fails at download when source file is missing" {
         .failure => |failure| {
             try std.testing.expectEqual(State.download_blob, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
-            try std.testing.expectEqual(error.IoNotFound, failure.cause);
+            try std.testing.expect(failure.cause == .io);
+            try std.testing.expectEqual(error.IoNotFound, failure.cause.io);
         },
     }
 }
@@ -112,7 +113,8 @@ test "attemptRunWithOptions fails in execute stage when declared source is missi
         .failure => |failure| {
             try std.testing.expectEqual(State.execute_build_graph, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
-            try std.testing.expectEqual(error.IoNotFound, failure.cause);
+            try std.testing.expect(failure.cause == .io);
+            try std.testing.expectEqual(error.IoNotFound, failure.cause.io);
         },
     }
 }
@@ -166,7 +168,8 @@ test "attemptRunWithOptions maps missing toolchain for c.compile to build failur
         .failure => |failure| {
             try std.testing.expectEqual(State.execute_build_graph, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_BUILD_TOOLCHAIN_MISSING, failure.code);
-            try std.testing.expectEqual(error.ToolchainMissing, failure.cause);
+            try std.testing.expect(failure.cause == .build);
+            try std.testing.expectEqual(error.ToolchainMissing, failure.cause.build);
         },
     }
 }
@@ -250,7 +253,8 @@ test "attemptRunWithOptions fails at verify_outputs on declared output sha misma
         .failure => |failure| {
             try std.testing.expectEqual(State.verify_outputs, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_OUTPUT_HASH_MISMATCH, failure.code);
-            try std.testing.expectEqual(error.OutputHashMismatch, failure.cause);
+            try std.testing.expect(failure.cause == .publish);
+            try std.testing.expectEqual(error.OutputHashMismatch, failure.cause.publish);
         },
     }
 }

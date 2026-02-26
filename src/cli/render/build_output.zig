@@ -35,7 +35,7 @@ pub fn printFailureHuman(failure: bootstrap.RunFailure) void {
         &error_id_buf,
         failure.code,
         @tagName(failure.at),
-        @errorName(failure.cause),
+        failure.cause.name(),
     );
 
     std.debug.print("Bootstrap failed\n", .{});
@@ -43,7 +43,7 @@ pub fn printFailureHuman(failure: bootstrap.RunFailure) void {
     std.debug.print("Code: {s} ({d})\n", .{ @tagName(failure.code), @intFromEnum(failure.code) });
     std.debug.print("Family: {s}\n", .{@tagName(descriptor.family)});
     std.debug.print("State: {s}\n", .{@tagName(failure.at)});
-    std.debug.print("Cause: {s}\n", .{@errorName(failure.cause)});
+    std.debug.print("Cause: {s}\n", .{failure.cause.name()});
     std.debug.print("Summary: {s}\n", .{descriptor.summary});
 }
 
@@ -60,7 +60,7 @@ pub fn buildFailureJsonLine(allocator: std.mem.Allocator, failure: bootstrap.Run
         &error_id_buf,
         failure.code,
         @tagName(failure.at),
-        @errorName(failure.cause),
+        failure.cause.name(),
     );
 
     var output: std.ArrayList(u8) = .empty;
@@ -81,7 +81,7 @@ pub fn buildFailureJsonLine(allocator: std.mem.Allocator, failure: bootstrap.Run
     try writer.writeAll(",\"state\":");
     try std.json.Stringify.encodeJsonString(@tagName(failure.at), .{}, writer);
     try writer.writeAll(",\"cause\":");
-    try std.json.Stringify.encodeJsonString(@errorName(failure.cause), .{}, writer);
+    try std.json.Stringify.encodeJsonString(failure.cause.name(), .{}, writer);
     try writer.writeAll(",\"summary\":");
     try std.json.Stringify.encodeJsonString(descriptor.summary, .{}, writer);
     try writer.writeAll("}\n");
@@ -171,7 +171,7 @@ test "buildFailureJsonLine renders stable failure payload" {
     const failure: bootstrap.RunFailure = .{
         .at = .init,
         .code = .KX_IO_NOT_FOUND,
-        .cause = error.IoNotFound,
+        .cause = .{ .io = error.IoNotFound },
     };
 
     const line = try buildFailureJsonLine(allocator, failure);

@@ -5,82 +5,58 @@ const kx_error = @import("../../errors/kx_error.zig");
 const state_types = @import("types.zig");
 
 const State = state_types.State;
+const FailureCause = state_types.FailureCause;
 
-pub fn classifyByState(state: State, err: anyerror) kx_error.Code {
-    return switch (state) {
-        .init => kx_error.classifyIo(err),
-        .load_trust_metadata, .verify_metadata_chain => kx_error.classifyTrust(err),
-        .parse_knxfile => kx_error.classifyParse(err),
-        .resolve_toolchain => classifyResolve(err),
-        .download_blob, .seal_cache_object => kx_error.classifyIo(err),
-        .unpack_staging => classifyUnpack(err),
-        .verify_blob => kx_error.classifyIntegrity(err),
-        .compute_tree_root, .verify_tree_root => kx_error.classifyIntegrity(err),
-        .execute_build_graph => classifyExecute(err),
-        .verify_outputs, .atomic_publish => kx_error.classifyPublish(err),
-        else => .KX_INTERNAL,
+pub fn classifyByState(state: State, cause: FailureCause) kx_error.Code {
+    _ = state;
+    return switch (cause) {
+        .io => |err| kx_error.classifyIo(err),
+        .trust => |err| kx_error.classifyTrust(err),
+        .parse => |err| kx_error.classifyParse(err),
+        .integrity => |err| kx_error.classifyIntegrity(err),
+        .build => |err| kx_error.classifyBuild(err),
+        .publish => |err| kx_error.classifyPublish(err),
+        .internal => .KX_INTERNAL,
     };
 }
 
-pub fn normalizeCauseByState(state: State, err: anyerror) anyerror {
+pub fn normalizeCauseByState(state: State, err: anyerror) FailureCause {
     return switch (state) {
-        .init, .download_blob, .seal_cache_object => kx_error.normalizeIo(err),
+        .init, .download_blob, .seal_cache_object => .{ .io = kx_error.normalizeIo(err) },
         .resolve_toolchain => normalizeResolveCause(err),
         .unpack_staging => normalizeUnpackCause(err),
-        .load_trust_metadata, .verify_metadata_chain => mini_tuf.normalizeError(err),
-        .parse_knxfile => parse_errors.normalize(err),
-        .verify_blob, .compute_tree_root, .verify_tree_root => kx_error.normalizeIntegrity(err),
+        .load_trust_metadata, .verify_metadata_chain => .{ .trust = mini_tuf.normalizeError(err) },
+        .parse_knxfile => .{ .parse = parse_errors.normalize(err) },
+        .verify_blob, .compute_tree_root, .verify_tree_root => .{ .integrity = kx_error.normalizeIntegrity(err) },
         .execute_build_graph => normalizeExecuteCause(err),
-        .verify_outputs, .atomic_publish => kx_error.normalizePublish(err),
-        else => err,
+        .verify_outputs, .atomic_publish => .{ .publish = kx_error.normalizePublish(err) },
+        else => .{ .internal = {} },
     };
 }
 
-fn classifyUnpack(err: anyerror) kx_error.Code {
-    const integrity_code = kx_error.classifyIntegrity(err);
-    if (integrity_code != .KX_INTERNAL) return integrity_code;
-    return kx_error.classifyIo(err);
-}
-
-fn normalizeUnpackCause(err: anyerror) anyerror {
+fn normalizeUnpackCause(err: anyerror) FailureCause {
     const integrity = kx_error.normalizeIntegrity(err);
-    if (integrity != error.Internal) return integrity;
-    return kx_error.normalizeIo(err);
+    if (integrity != error.Internal) return .{ .integrity = integrity };
+    return .{ .io = kx_error.normalizeIo(err) };
 }
 
-fn classifyResolve(err: anyerror) kx_error.Code {
-    const integrity_code = kx_error.classifyIntegrity(err);
-    if (integrity_code != .KX_INTERNAL) return integrity_code;
-    return kx_error.classifyIo(err);
-}
-
-fn normalizeResolveCause(err: anyerror) anyerror {
+fn normalizeResolveCause(err: anyerror) FailureCause {
     const integrity = kx_error.normalizeIntegrity(err);
-    if (integrity != error.Internal) return integrity;
-    return kx_error.normalizeIo(err);
+    if (integrity != error.Internal) return .{ .integrity = integrity };
+    return .{ .io = kx_error.normalizeIo(err) };
 }
 
-fn classifyExecute(err: anyerror) kx_error.Code {
-    const build_code = kx_error.classifyBuild(err);
-    if (build_code != .KX_INTERNAL) return build_code;
-
-    const integrity_code = kx_error.classifyIntegrity(err);
-    if (integrity_code != .KX_INTERNAL) return integrity_code;
-
-    return kx_error.classifyIo(err);
-}
-
-fn normalizeExecuteCause(err: anyerror) anyerror {
+fn normalizeExecuteCause(err: anyerror) FailureCause {
     const build = kx_error.normalizeBuild(err);
-    if (build != error.Internal) return build;
+    if (build != error.Internal) return .{ .build = build };
 
     const integrity = kx_error.normalizeIntegrity(err);
-    if (integrity != error.Internal) return integrity;
+    if (integrity != error.Internal) return .{ .integrity = integrity };
 
     const io = kx_error.normalizeIo(err);
-    if (io != error.Internal) return io;
+    if (io != error.Internal) return .{ .io = io };
 
-    return err;
+    return .{ .internal = {} };
 }
 
 test "classify/normalize maps integrity failure by error kind" {

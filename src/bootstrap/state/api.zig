@@ -42,7 +42,7 @@ pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const
             .failure = .{
                 .at = .init,
                 .code = kx_error.classifyIo(cause),
-                .cause = cause,
+                .cause = .{ .io = cause },
             },
         };
     };

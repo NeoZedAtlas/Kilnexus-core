@@ -1,4 +1,6 @@
 const std = @import("std");
+const parse_errors = @import("../parser/parse_errors.zig");
+const mini_tuf = @import("../trust/mini_tuf.zig");
 
 pub const Family = enum {
     parse,
@@ -193,167 +195,159 @@ pub fn buildErrorId(
     ) catch "kx:id_overflow";
 }
 
-pub fn classifyTrust(err: anyerror) Code {
-    if (err == error.MetadataMissing) {
-        return .KX_TRUST_METADATA_MISSING;
-    }
+const AliasRule = struct {
+    from: []const u8,
+    to: []const u8,
+};
 
-    if (err == error.MetadataMalformed) {
-        return .KX_TRUST_METADATA_MALFORMED;
-    }
+const Convention = struct {
+    family: []const u8,
+    strip_prefix: ?[]const u8 = null,
+    aliases: []const AliasRule = &.{},
+};
 
-    if (err == error.RolePolicyInvalid) {
-        return .KX_TRUST_ROLE_POLICY;
-    }
+const trust_convention = Convention{
+    .family = "TRUST",
+    .aliases = &.{
+        .{ .from = "RolePolicyInvalid", .to = "RolePolicy" },
+        .{ .from = "SignatureThresholdNotMet", .to = "SignatureThreshold" },
+        .{ .from = "RollbackDetected", .to = "Rollback" },
+        .{ .from = "VersionLinkMismatch", .to = "VersionLink" },
+    },
+};
 
-    if (err == error.KeyUnsupported) {
-        return .KX_TRUST_KEY_UNSUPPORTED;
-    }
+const parse_convention = Convention{
+    .family = "PARSE",
+    .aliases = &.{
+        .{ .from = "Canonicalization", .to = "Canonical" },
+    },
+};
 
-    if (err == error.SignatureInvalid) {
-        return .KX_TRUST_SIGNATURE_INVALID;
-    }
+const io_convention = Convention{
+    .family = "IO",
+    .strip_prefix = "Io",
+};
 
-    if (err == error.SignatureThresholdNotMet) {
-        return .KX_TRUST_SIGNATURE_THRESHOLD;
-    }
+const integrity_convention = Convention{
+    .family = "INTEGRITY",
+};
 
-    if (err == error.MetadataExpired) {
-        return .KX_TRUST_METADATA_EXPIRED;
-    }
+const build_convention = Convention{
+    .family = "BUILD",
+};
 
-    if (err == error.RollbackDetected) return .KX_TRUST_ROLLBACK;
+const publish_convention = Convention{
+    .family = "PUBLISH",
+    .aliases = &.{
+        .{ .from = "AtomicFailed", .to = "Atomic" },
+        .{ .from = "PermissionDenied", .to = "Permission" },
+    },
+};
 
-    if (err == error.VersionLinkMismatch) {
-        return .KX_TRUST_VERSION_LINK;
-    }
-
-    if (err == error.VersionInvalid) {
-        return .KX_TRUST_VERSION_INVALID;
-    }
-
-    if (err == error.StateInvalid) {
-        return .KX_TRUST_STATE_INVALID;
-    }
-
-    if (err == error.StateIo) {
-        return .KX_TRUST_STATE_IO;
-    }
-
-    return .KX_INTERNAL;
+pub fn classifyTrust(err: mini_tuf.TrustError) Code {
+    return classifyByConvention(trust_convention, @errorName(err));
 }
 
-pub fn classifyParse(err: anyerror) Code {
-    if (err == error.EmptyInput) return .KX_PARSE_EMPTY_INPUT;
-    if (err == error.Syntax) return .KX_PARSE_SYNTAX;
-    if (err == error.Schema) return .KX_PARSE_SCHEMA;
-    if (err == error.Canonicalization) return .KX_PARSE_CANONICAL;
-    if (err == error.MissingField) return .KX_PARSE_MISSING_FIELD;
-    if (err == error.TypeMismatch) return .KX_PARSE_TYPE_MISMATCH;
-    if (err == error.ValueInvalid) return .KX_PARSE_VALUE_INVALID;
-    if (err == error.VersionUnsupported) return .KX_PARSE_VERSION_UNSUPPORTED;
-    if (err == error.OperatorDisallowed) return .KX_PARSE_OPERATOR_DISALLOWED;
-    if (err == error.OutputInvalid) return .KX_PARSE_OUTPUT_INVALID;
-    if (err == error.LegacyBuildBlock) return .KX_PARSE_LEGACY_BUILD_BLOCK;
-
-    return .KX_INTERNAL;
+pub fn classifyParse(err: parse_errors.ParseError) Code {
+    return classifyByConvention(parse_convention, @errorName(err));
 }
 
-pub fn classifyIo(err: anyerror) Code {
-    if (err == error.IoNotFound) return .KX_IO_NOT_FOUND;
-    if (err == error.IoAccessDenied) return .KX_IO_ACCESS_DENIED;
-    if (err == error.IoAlreadyExists) return .KX_IO_ALREADY_EXISTS;
-    if (err == error.IoPathInvalid) return .KX_IO_PATH_INVALID;
-    if (err == error.IoNoSpace) return .KX_IO_NO_SPACE;
-    if (err == error.IoRenameFailed) return .KX_IO_RENAME_FAILED;
-    if (err == error.IoWriteFailed) return .KX_IO_WRITE_FAILED;
-    if (err == error.IoReadFailed) return .KX_IO_READ_FAILED;
-
-    return .KX_INTERNAL;
+pub fn classifyIo(err: IoError) Code {
+    return classifyByConvention(io_convention, @errorName(err));
 }
 
-pub fn classifyIntegrity(err: anyerror) Code {
-    if (err == error.BlobMismatch) {
-        return .KX_INTEGRITY_BLOB_MISMATCH;
-    }
-
-    if (err == error.TreeMismatch) {
-        return .KX_INTEGRITY_TREE_MISMATCH;
-    }
-
-    if (err == error.SizeMismatch) {
-        return .KX_INTEGRITY_SIZE_MISMATCH;
-    }
-
-    if (err == error.HashUnsupported) {
-        return .KX_INTEGRITY_HASH_UNSUPPORTED;
-    }
-
-    if (err == error.PathTraversal) {
-        return .KX_INTEGRITY_PATH_TRAVERSAL;
-    }
-
-    if (err == error.SymlinkPolicy) {
-        return .KX_INTEGRITY_SYMLINK_POLICY;
-    }
-
-    return .KX_INTERNAL;
+pub fn classifyIntegrity(err: IntegrityError) Code {
+    return classifyByConvention(integrity_convention, @errorName(err));
 }
 
-pub fn classifyBuild(err: anyerror) Code {
-    if (err == error.OperatorFailed) {
-        return .KX_BUILD_OPERATOR_FAILED;
-    }
-
-    if (err == error.OperatorDisallowed) {
-        return .KX_BUILD_OPERATOR_DISALLOWED;
-    }
-
-    if (err == error.ToolchainMissing) {
-        return .KX_BUILD_TOOLCHAIN_MISSING;
-    }
-
-    if (err == error.SandboxViolation) {
-        return .KX_BUILD_SANDBOX_VIOLATION;
-    }
-
-    if (err == error.GraphInvalid) {
-        return .KX_BUILD_GRAPH_INVALID;
-    }
-
-    if (err == error.Timeout) {
-        return .KX_BUILD_TIMEOUT;
-    }
-
-    if (err == error.NotImplemented) {
-        return .KX_BUILD_NOT_IMPLEMENTED;
-    }
-
-    return .KX_INTERNAL;
+pub fn classifyBuild(err: BuildError) Code {
+    return classifyByConvention(build_convention, @errorName(err));
 }
 
-pub fn classifyPublish(err: anyerror) Code {
-    if (err == error.AtomicFailed) {
-        return .KX_PUBLISH_ATOMIC;
-    }
+pub fn classifyPublish(err: PublishError) Code {
+    return classifyByConvention(publish_convention, @errorName(err));
+}
 
-    if (err == error.OutputMissing) {
-        return .KX_PUBLISH_OUTPUT_MISSING;
-    }
+fn classifyByConvention(comptime convention: Convention, err_name: []const u8) Code {
+    const mapped = resolveAlias(convention.aliases, maybeStripPrefix(err_name, convention.strip_prefix));
+    var code_buf: [128]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&code_buf, "KX_{s}_", .{convention.family}) catch return .KX_INTERNAL;
+    const written = writeUpperSnake(code_buf[prefix.len..], mapped);
+    const code_name = code_buf[0 .. prefix.len + written];
+    return lookupCodeByName(code_name) orelse .KX_INTERNAL;
+}
 
-    if (err == error.OutputHashMismatch) {
-        return .KX_PUBLISH_OUTPUT_HASH_MISMATCH;
-    }
+fn maybeStripPrefix(name: []const u8, maybe_prefix: ?[]const u8) []const u8 {
+    const prefix = maybe_prefix orelse return name;
+    if (std.mem.startsWith(u8, name, prefix)) return name[prefix.len..];
+    return name;
+}
 
-    if (err == error.FsyncFailed) {
-        return .KX_PUBLISH_FSYNC_FAILED;
+fn resolveAlias(comptime aliases: []const AliasRule, name: []const u8) []const u8 {
+    inline for (aliases) |alias| {
+        if (std.mem.eql(u8, name, alias.from)) return alias.to;
     }
+    return name;
+}
 
-    if (err == error.PermissionDenied) {
-        return .KX_PUBLISH_PERMISSION;
+fn writeUpperSnake(buffer: []u8, camel: []const u8) usize {
+    var out: usize = 0;
+    for (camel, 0..) |ch, idx| {
+        if (idx != 0 and std.ascii.isUpper(ch)) {
+            if (out >= buffer.len) break;
+            buffer[out] = '_';
+            out += 1;
+        }
+        if (out >= buffer.len) break;
+        buffer[out] = std.ascii.toUpper(ch);
+        out += 1;
     }
+    return out;
+}
 
-    return .KX_INTERNAL;
+fn lookupCodeByName(name: []const u8) ?Code {
+    inline for (@typeInfo(Code).@"enum".fields) |field| {
+        if (std.mem.eql(u8, name, field.name)) {
+            return @enumFromInt(field.value);
+        }
+    }
+    return null;
+}
+
+fn assertConventionCoverage(
+    comptime ErrorSet: type,
+    comptime convention: Convention,
+    comptime ignored: []const []const u8,
+) void {
+    const info = @typeInfo(ErrorSet);
+    const fields = info.error_set.?;
+    inline for (fields) |field| {
+        if (isIgnored(field.name, ignored)) continue;
+        const code = classifyByConvention(convention, field.name);
+        if (code == .KX_INTERNAL) {
+            @compileError(std.fmt.comptimePrint(
+                "No Code mapping for {s}.{s} via convention family={s}",
+                .{ @typeName(ErrorSet), field.name, convention.family },
+            ));
+        }
+    }
+}
+
+fn isIgnored(comptime name: []const u8, comptime ignored: []const []const u8) bool {
+    inline for (ignored) |item| {
+        if (std.mem.eql(u8, name, item)) return true;
+    }
+    return false;
+}
+
+comptime {
+    @setEvalBranchQuota(50_000);
+    assertConventionCoverage(mini_tuf.TrustError, trust_convention, &.{"Internal"});
+    assertConventionCoverage(parse_errors.ParseError, parse_convention, &.{"Internal"});
+    assertConventionCoverage(IoError, io_convention, &.{"Internal"});
+    assertConventionCoverage(IntegrityError, integrity_convention, &.{"Internal"});
+    assertConventionCoverage(BuildError, build_convention, &.{"Internal"});
+    assertConventionCoverage(PublishError, publish_convention, &.{"Internal"});
 }
 
 pub fn normalizeIntegrity(err: anyerror) IntegrityError {

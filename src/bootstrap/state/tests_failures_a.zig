@@ -70,7 +70,8 @@ test "attemptRunWithOptions returns structured parse error" {
         .failure => |failure| {
             try std.testing.expectEqual(State.parse_knxfile, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_PARSE_MISSING_FIELD, failure.code);
-            try std.testing.expectEqual(error.MissingField, failure.cause);
+            try std.testing.expect(failure.cause == .parse);
+            try std.testing.expectEqual(error.MissingField, failure.cause.parse);
         },
     }
 }
@@ -127,7 +128,8 @@ test "attemptRunWithOptions rejects build writes into mounted input path" {
         .failure => |failure| {
             try std.testing.expectEqual(State.parse_knxfile, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_PARSE_VALUE_INVALID, failure.code);
-            try std.testing.expectEqual(error.ValueInvalid, failure.cause);
+            try std.testing.expect(failure.cause == .parse);
+            try std.testing.expectEqual(error.ValueInvalid, failure.cause.parse);
         },
     }
 }
@@ -148,7 +150,8 @@ test "attemptRunFromPathWithOptions returns canonical io cause for missing input
         .failure => |failure| {
             try std.testing.expectEqual(State.init, failure.at);
             try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, failure.code);
-            try std.testing.expectEqual(error.IoNotFound, failure.cause);
+            try std.testing.expect(failure.cause == .io);
+            try std.testing.expectEqual(error.IoNotFound, failure.cause.io);
         },
     }
 }

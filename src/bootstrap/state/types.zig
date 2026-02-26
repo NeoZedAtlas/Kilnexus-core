@@ -1,6 +1,7 @@
 const std = @import("std");
 const validator = @import("../../knx/validator.zig");
 const mini_tuf = @import("../../trust/mini_tuf.zig");
+const parse_errors = @import("../../parser/parse_errors.zig");
 const kx_error = @import("../../errors/kx_error.zig");
 
 pub const State = enum {
@@ -39,10 +40,32 @@ pub const RunResult = struct {
     }
 };
 
+pub const FailureCause = union(enum) {
+    io: kx_error.IoError,
+    trust: mini_tuf.TrustError,
+    parse: parse_errors.ParseError,
+    integrity: kx_error.IntegrityError,
+    build: kx_error.BuildError,
+    publish: kx_error.PublishError,
+    internal: void,
+
+    pub fn name(self: FailureCause) []const u8 {
+        return switch (self) {
+            .io => |err| @errorName(err),
+            .trust => |err| @errorName(err),
+            .parse => |err| @errorName(err),
+            .integrity => |err| @errorName(err),
+            .build => |err| @errorName(err),
+            .publish => |err| @errorName(err),
+            .internal => "Internal",
+        };
+    }
+};
+
 pub const RunFailure = struct {
     at: State,
     code: kx_error.Code,
-    cause: anyerror,
+    cause: FailureCause,
 };
 
 pub const RunAttempt = union(enum) {
