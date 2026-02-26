@@ -19,65 +19,65 @@ pub fn classifyByState(state: State, cause: FailureCause) kx_error.Code {
     };
 }
 
-pub fn translateCauseByState(state: State, err: anyerror) FailureCause {
+pub fn translateCauseByState(state: State, err_name: []const u8) FailureCause {
     return switch (state) {
-        .init, .download_blob, .seal_cache_object => .{ .io = boundary_map.mapIo(err) },
-        .resolve_toolchain => translateResolveCause(err),
-        .unpack_staging => translateUnpackCause(err),
-        .load_trust_metadata, .verify_metadata_chain => .{ .trust = boundary_map.mapTrust(err) },
-        .parse_knxfile => .{ .parse = boundary_map.mapParse(err) },
-        .verify_blob, .compute_tree_root, .verify_tree_root => .{ .integrity = boundary_map.mapIntegrity(err) },
-        .execute_build_graph => translateExecuteCause(err),
-        .verify_outputs, .atomic_publish => .{ .publish = boundary_map.mapPublish(err) },
+        .init, .download_blob, .seal_cache_object => .{ .io = boundary_map.mapIo(err_name) },
+        .resolve_toolchain => translateResolveCause(err_name),
+        .unpack_staging => translateUnpackCause(err_name),
+        .load_trust_metadata, .verify_metadata_chain => .{ .trust = boundary_map.mapTrust(err_name) },
+        .parse_knxfile => .{ .parse = boundary_map.mapParse(err_name) },
+        .verify_blob, .compute_tree_root, .verify_tree_root => .{ .integrity = boundary_map.mapIntegrity(err_name) },
+        .execute_build_graph => translateExecuteCause(err_name),
+        .verify_outputs, .atomic_publish => .{ .publish = boundary_map.mapPublish(err_name) },
         else => .{ .internal = {} },
     };
 }
 
-fn translateUnpackCause(err: anyerror) FailureCause {
-    const integrity = boundary_map.mapIntegrity(err);
+fn translateUnpackCause(err_name: []const u8) FailureCause {
+    const integrity = boundary_map.mapIntegrity(err_name);
     if (integrity != error.Internal) return .{ .integrity = integrity };
-    return .{ .io = boundary_map.mapIo(err) };
+    return .{ .io = boundary_map.mapIo(err_name) };
 }
 
-fn translateResolveCause(err: anyerror) FailureCause {
-    const integrity = boundary_map.mapIntegrity(err);
+fn translateResolveCause(err_name: []const u8) FailureCause {
+    const integrity = boundary_map.mapIntegrity(err_name);
     if (integrity != error.Internal) return .{ .integrity = integrity };
-    return .{ .io = boundary_map.mapIo(err) };
+    return .{ .io = boundary_map.mapIo(err_name) };
 }
 
-fn translateExecuteCause(err: anyerror) FailureCause {
-    const build = boundary_map.mapBuild(err);
+fn translateExecuteCause(err_name: []const u8) FailureCause {
+    const build = boundary_map.mapBuild(err_name);
     if (build != error.Internal) return .{ .build = build };
 
-    const integrity = boundary_map.mapIntegrity(err);
+    const integrity = boundary_map.mapIntegrity(err_name);
     if (integrity != error.Internal) return .{ .integrity = integrity };
 
-    const io = boundary_map.mapIo(err);
+    const io = boundary_map.mapIo(err_name);
     if (io != error.Internal) return .{ .io = io };
 
     return .{ .internal = {} };
 }
 
 test "classify/translate maps integrity failure by error kind" {
-    const mapped_blob = classifyByState(.verify_blob, translateCauseByState(.verify_blob, error.BlobHashMismatch));
+    const mapped_blob = classifyByState(.verify_blob, translateCauseByState(.verify_blob, "BlobHashMismatch"));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_BLOB_MISMATCH, mapped_blob);
 
-    const mapped_tree = classifyByState(.verify_tree_root, translateCauseByState(.verify_tree_root, error.PathTraversalDetected));
+    const mapped_tree = classifyByState(.verify_tree_root, translateCauseByState(.verify_tree_root, "PathTraversalDetected"));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped_tree);
 
-    const mapped_resolve = classifyByState(.resolve_toolchain, translateCauseByState(.resolve_toolchain, error.TreeRootMismatch));
+    const mapped_resolve = classifyByState(.resolve_toolchain, translateCauseByState(.resolve_toolchain, "TreeRootMismatch"));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_TREE_MISMATCH, mapped_resolve);
 }
 
 test "classify/translate maps publish failure by error kind" {
-    const mapped_fsync = classifyByState(.atomic_publish, translateCauseByState(.atomic_publish, error.FsyncFailed));
+    const mapped_fsync = classifyByState(.atomic_publish, translateCauseByState(.atomic_publish, "FsyncFailed"));
     try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_FSYNC_FAILED, mapped_fsync);
 
-    const mapped_hash = classifyByState(.verify_outputs, translateCauseByState(.verify_outputs, error.OutputHashMismatch));
+    const mapped_hash = classifyByState(.verify_outputs, translateCauseByState(.verify_outputs, "OutputHashMismatch"));
     try std.testing.expectEqual(kx_error.Code.KX_PUBLISH_OUTPUT_HASH_MISMATCH, mapped_hash);
 }
 
 test "classify/translate maps unpack traversal as integrity error" {
-    const mapped = classifyByState(.unpack_staging, translateCauseByState(.unpack_staging, error.PathTraversalDetected));
+    const mapped = classifyByState(.unpack_staging, translateCauseByState(.unpack_staging, "PathTraversalDetected"));
     try std.testing.expectEqual(kx_error.Code.KX_INTEGRITY_PATH_TRAVERSAL, mapped);
 }

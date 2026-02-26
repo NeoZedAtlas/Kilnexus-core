@@ -255,7 +255,7 @@ fn downloadHttpWithRetries(self: *InstallSession, url: []const u8, hard_cap: u64
     var attempt: u8 = 0;
     while (attempt < self.download_attempts) : (attempt += 1) {
         downloadHttpAttempt(self, url, hard_cap) catch |err| {
-            if (attempt + 1 >= self.download_attempts or !isRetryableDownloadError(err)) {
+            if (attempt + 1 >= self.download_attempts or !isRetryableDownloadErrorName(@errorName(err))) {
                 return err;
             }
             const backoff_ms = @as(u64, 200) * (@as(u64, attempt) + 1);
@@ -355,20 +355,27 @@ fn enforceDeadline(deadline_ms: ?u64) !void {
     }
 }
 
-fn isRetryableDownloadError(err: anyerror) bool {
-    return err == error.ConnectionTimedOut or
-        err == error.ConnectionResetByPeer or
-        err == error.ConnectionRefused or
-        err == error.NetworkUnreachable or
-        err == error.TemporaryNameServerFailure or
-        err == error.NameServerFailure or
-        err == error.HttpHeadersInvalid or
-        err == error.HttpHeadersOversize or
-        err == error.HttpChunkInvalid or
-        err == error.HttpChunkTruncated or
-        err == error.ReadFailed or
-        err == error.WriteFailed;
+fn isRetryableDownloadErrorName(err_name: []const u8) bool {
+    inline for (retryable_download_errors) |name| {
+        if (std.mem.eql(u8, err_name, name)) return true;
+    }
+    return false;
 }
+
+const retryable_download_errors = [_][]const u8{
+    "ConnectionTimedOut",
+    "ConnectionResetByPeer",
+    "ConnectionRefused",
+    "NetworkUnreachable",
+    "TemporaryNameServerFailure",
+    "NameServerFailure",
+    "HttpHeadersInvalid",
+    "HttpHeadersOversize",
+    "HttpChunkInvalid",
+    "HttpChunkTruncated",
+    "ReadFailed",
+    "WriteFailed",
+};
 
 fn sanitizeId(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     var out = try allocator.alloc(u8, text.len);
@@ -864,7 +871,7 @@ fn renameWithRetries(from_path: []const u8, to_path: []const u8) !void {
     var attempt: u8 = 0;
     while (true) : (attempt += 1) {
         std.fs.cwd().rename(from_path, to_path) catch |err| {
-            if (!isRetryableWindowsSealError(err) or attempt + 1 >= windows_seal_retry_attempts) {
+            if (!isRetryableWindowsSealErrorName(@errorName(err)) or attempt + 1 >= windows_seal_retry_attempts) {
                 return err;
             }
             const backoff_ms = windows_seal_retry_delay_ms * (@as(u64, attempt) + 1);
@@ -931,11 +938,18 @@ fn tightenWindowsAcl(allocator: std.mem.Allocator, root_path: []const u8) !void 
     }
 }
 
-fn isRetryableWindowsSealError(err: anyerror) bool {
-    return err == error.AccessDenied or
-        err == error.PermissionDenied or
-        err == error.FileBusy;
+fn isRetryableWindowsSealErrorName(err_name: []const u8) bool {
+    inline for (retryable_windows_seal_errors) |name| {
+        if (std.mem.eql(u8, err_name, name)) return true;
+    }
+    return false;
 }
+
+const retryable_windows_seal_errors = [_][]const u8{
+    "AccessDenied",
+    "PermissionDenied",
+    "FileBusy",
+};
 
 fn resolveIcaclsPath(allocator: std.mem.Allocator) ![]u8 {
     const win_dir = std.process.getEnvVarOwned(allocator, "WINDIR") catch {

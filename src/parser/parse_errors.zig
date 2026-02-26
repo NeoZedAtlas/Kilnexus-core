@@ -48,12 +48,12 @@ const parse_aliases: []const Alias = &.{
     .{ .from = "InvalidMode", .to = "OutputInvalid" },
 };
 
-pub fn normalize(err: anyerror) ParseError {
-    return normalizeTo(ParseError, err, parse_aliases);
+pub fn normalizeName(err_name: []const u8) ParseError {
+    return normalizeTo(ParseError, err_name, parse_aliases);
 }
 
-fn normalizeTo(comptime Target: type, err: anyerror, comptime aliases: []const Alias) Target {
-    const resolved = resolveAliasName(@errorName(err), aliases);
+fn normalizeTo(comptime Target: type, err_name: []const u8, comptime aliases: []const Alias) Target {
+    const resolved = resolveAliasName(err_name, aliases);
     return errorFromName(Target, resolved) orelse error.Internal;
 }
 
@@ -74,9 +74,9 @@ fn errorFromName(comptime Target: type, name: []const u8) ?Target {
 }
 
 test "normalize maps parser and validator errors into canonical parse errors" {
-    try std.testing.expect(normalize(error.Parse) == error.Syntax);
-    try std.testing.expect(normalize(error.MissingVersion) == error.MissingField);
-    try std.testing.expect(normalize(error.InvalidPolicyNetwork) == error.ValueInvalid);
-    try std.testing.expect(normalize(error.InvalidMode) == error.OutputInvalid);
-    try std.testing.expect(normalize(error.LegacyBuildBlock) == error.LegacyBuildBlock);
+    try std.testing.expect(normalizeName("Parse") == error.Syntax);
+    try std.testing.expect(normalizeName("MissingVersion") == error.MissingField);
+    try std.testing.expect(normalizeName("InvalidPolicyNetwork") == error.ValueInvalid);
+    try std.testing.expect(normalizeName("InvalidMode") == error.OutputInvalid);
+    try std.testing.expect(normalizeName("LegacyBuildBlock") == error.LegacyBuildBlock);
 }

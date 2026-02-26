@@ -22,11 +22,11 @@ pub fn printUsage() void {
     std.debug.print("version options: --json --help\n", .{});
 }
 
-pub fn printSimpleFailureHuman(command: []const u8, err: anyerror) void {
-    std.debug.print("{s} failed: {s}\n", .{ command, @errorName(err) });
+pub fn printSimpleFailureHuman(command: []const u8, err_name: []const u8) void {
+    std.debug.print("{s} failed: {s}\n", .{ command, err_name });
 }
 
-pub fn printSimpleFailureJson(allocator: std.mem.Allocator, command: []const u8, err: anyerror) !void {
+pub fn printSimpleFailureJson(allocator: std.mem.Allocator, command: []const u8, err_name: []const u8) !void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var out_writer = out.writer(allocator);
@@ -37,7 +37,7 @@ pub fn printSimpleFailureJson(allocator: std.mem.Allocator, command: []const u8,
     try writer.writeAll("{\"status\":\"failed\",\"command\":");
     try std.json.Stringify.encodeJsonString(command, .{}, writer);
     try writer.writeAll(",\"error\":");
-    try std.json.Stringify.encodeJsonString(@errorName(err), .{}, writer);
+    try std.json.Stringify.encodeJsonString(err_name, .{}, writer);
     try writer.writeAll("}\n");
     try writer.flush();
     std.debug.print("{s}", .{out.items});

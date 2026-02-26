@@ -42,7 +42,7 @@ pub fn parseLockfileStrict(allocator: std.mem.Allocator, input: []const u8) pars
         return error.EmptyInput;
     }
 
-    return parseLockfile(allocator, input) catch |err| return parse_errors.normalize(err);
+    return parseLockfile(allocator, input) catch |err| return parse_errors.normalizeName(@errorName(err));
 }
 
 test "parseLockfile normalizes CRLF and trims outer whitespace" {

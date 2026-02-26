@@ -62,7 +62,7 @@ pub fn loadFromDir(allocator: std.mem.Allocator, trust_dir_path: []const u8) !Me
 }
 
 pub fn loadFromDirStrict(allocator: std.mem.Allocator, trust_dir_path: []const u8) TrustError!MetadataBundle {
-    return loadFromDir(allocator, trust_dir_path) catch |err| return normalizeError(err);
+    return loadFromDir(allocator, trust_dir_path) catch |err| return normalizeErrorName(@errorName(err));
 }
 
 pub fn verify(allocator: std.mem.Allocator, bundle: *const MetadataBundle, options: VerifyOptions) !VerificationSummary {
@@ -105,7 +105,7 @@ pub fn verify(allocator: std.mem.Allocator, bundle: *const MetadataBundle, optio
 }
 
 pub fn verifyStrict(allocator: std.mem.Allocator, bundle: *const MetadataBundle, options: VerifyOptions) TrustError!VerificationSummary {
-    return verify(allocator, bundle, options) catch |err| return normalizeError(err);
+    return verify(allocator, bundle, options) catch |err| return normalizeErrorName(@errorName(err));
 }
 
 pub fn enforceRollback(previous: VerificationSummary, current: VerificationSummary) !void {
@@ -165,12 +165,12 @@ const trust_aliases: []const Alias = &.{
     .{ .from = "RenameAcrossMountPoints", .to = "StateIo" },
 };
 
-pub fn normalizeError(err: anyerror) TrustError {
-    return normalizeTo(TrustError, err, trust_aliases);
+pub fn normalizeErrorName(err_name: []const u8) TrustError {
+    return normalizeTo(TrustError, err_name, trust_aliases);
 }
 
-fn normalizeTo(comptime Target: type, err: anyerror, comptime aliases: []const Alias) Target {
-    const resolved = resolveAliasName(@errorName(err), aliases);
+fn normalizeTo(comptime Target: type, err_name: []const u8, comptime aliases: []const Alias) Target {
+    const resolved = resolveAliasName(err_name, aliases);
     return errorFromName(Target, resolved) orelse error.Internal;
 }
 
@@ -676,9 +676,9 @@ test "verify rejects rollback" {
 }
 
 test "normalizeError maps raw errors into canonical trust errors" {
-    try std.testing.expect(normalizeError(error.InvalidThreshold) == error.RolePolicyInvalid);
-    try std.testing.expect(normalizeError(error.InvalidTimestampFormat) == error.MetadataExpired);
-    try std.testing.expect(normalizeError(error.InvalidStateVersion) == error.StateInvalid);
+    try std.testing.expect(normalizeErrorName("InvalidThreshold") == error.RolePolicyInvalid);
+    try std.testing.expect(normalizeErrorName("InvalidTimestampFormat") == error.MetadataExpired);
+    try std.testing.expect(normalizeErrorName("InvalidStateVersion") == error.StateInvalid);
 }
 
 test "parseIso8601Utc validates format and value" {

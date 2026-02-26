@@ -216,7 +216,7 @@ pub fn runClean(allocator: std.mem.Allocator, options: CleanOptions) !CleanRepor
                 continue;
             },
             else => {
-                try appendErrorItem(allocator, &error_items, candidate.path, .move_to_trash, err);
+                try appendErrorItem(allocator, &error_items, candidate.path, .move_to_trash, @errorName(err));
                 report.errors = error_items.items.len;
                 continue;
             },
@@ -224,7 +224,7 @@ pub fn runClean(allocator: std.mem.Allocator, options: CleanOptions) !CleanRepor
         defer allocator.free(moved);
 
         deleteMovedPath(moved, candidate.is_dir) catch |err| {
-            try appendErrorItem(allocator, &error_items, moved, .delete_moved, err);
+            try appendErrorItem(allocator, &error_items, moved, .delete_moved, @errorName(err));
             report.errors = error_items.items.len;
             continue;
         };
@@ -245,12 +245,12 @@ fn appendErrorItem(
     error_items: *std.ArrayList(CleanError),
     path: []const u8,
     phase: ErrorPhase,
-    err: anyerror,
+    err_name: []const u8,
 ) !void {
     try error_items.append(allocator, .{
         .path = try allocator.dupe(u8, path),
         .phase = phase,
-        .reason = try allocator.dupe(u8, @errorName(err)),
+        .reason = try allocator.dupe(u8, err_name),
     });
 }
 

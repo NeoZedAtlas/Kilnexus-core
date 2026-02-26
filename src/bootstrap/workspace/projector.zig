@@ -47,7 +47,7 @@ fn projectMapping(source_abs_path: []const u8, target_path: []const u8, link_mod
         .symlink_only => try std.fs.cwd().symLink(source_abs_path, target_path, .{}),
         .hardlink_then_symlink => {
             std.posix.link(source_abs_path, target_path) catch |err| {
-                if (!shouldFallbackToSymlink(err)) return err;
+                if (!shouldFallbackToSymlinkName(@errorName(err))) return err;
                 try std.fs.cwd().symLink(source_abs_path, target_path, .{});
             };
         },
@@ -66,14 +66,21 @@ fn projectWindows(source_abs_path: []const u8, target_path: []const u8, link_mod
     }
 }
 
-fn shouldFallbackToSymlink(err: anyerror) bool {
-    return err == error.NotSameFileSystem or
-        err == error.AccessDenied or
-        err == error.PermissionDenied or
-        err == error.FileSystem or
-        err == error.ReadOnlyFileSystem or
-        err == error.LinkQuotaExceeded;
+fn shouldFallbackToSymlinkName(err_name: []const u8) bool {
+    inline for (symlink_fallback_errors) |name| {
+        if (std.mem.eql(u8, err_name, name)) return true;
+    }
+    return false;
 }
+
+const symlink_fallback_errors = [_][]const u8{
+    "NotSameFileSystem",
+    "AccessDenied",
+    "PermissionDenied",
+    "FileSystem",
+    "ReadOnlyFileSystem",
+    "LinkQuotaExceeded",
+};
 
 fn pathIsDirectory(path: []const u8) !bool {
     var dir = std.fs.cwd().openDir(path, .{}) catch |err| switch (err) {

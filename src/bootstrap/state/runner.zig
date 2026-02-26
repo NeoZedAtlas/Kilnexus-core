@@ -88,7 +88,7 @@ pub fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, opti
     validator.validateBuildWriteIsolation(&workspace_spec, &build_spec) catch |err| {
         failed_at.* = .parse_knxfile;
         push(&trace, allocator, .failed) catch {};
-        return parse_errors.normalize(err);
+        return parse_errors.normalizeName(@errorName(err));
     };
     var output_spec = validator.parseOutputSpecStrict(allocator, parsed.canonical_json) catch |err| {
         failed_at.* = .parse_knxfile;

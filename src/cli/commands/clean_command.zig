@@ -26,7 +26,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .apply = cli.apply,
     }) catch |err| {
         if (cli.json_output) {
-            try printErrorJson(allocator, err);
+            try printErrorJson(allocator, @errorName(err));
         } else {
             std.debug.print("clean failed: {s}\n", .{@errorName(err)});
         }
@@ -140,7 +140,7 @@ fn printJson(allocator: std.mem.Allocator, cli: cli_types.CleanCliArgs, report: 
     std.debug.print("{s}", .{out.items});
 }
 
-fn printErrorJson(allocator: std.mem.Allocator, err: anyerror) !void {
+fn printErrorJson(allocator: std.mem.Allocator, err_name: []const u8) !void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var out_writer = out.writer(allocator);
@@ -148,7 +148,7 @@ fn printErrorJson(allocator: std.mem.Allocator, err: anyerror) !void {
     var out_adapter = out_writer.adaptToNewApi(&out_buffer);
     const writer = &out_adapter.new_interface;
     try writer.writeAll("{\"status\":\"failed\",\"command\":\"clean\",\"error\":");
-    try std.json.Stringify.encodeJsonString(@errorName(err), .{}, writer);
+    try std.json.Stringify.encodeJsonString(err_name, .{}, writer);
     try writer.writeAll("}\n");
     try writer.flush();
     std.debug.print("{s}", .{out.items});

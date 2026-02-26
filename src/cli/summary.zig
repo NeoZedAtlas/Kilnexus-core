@@ -25,7 +25,7 @@ pub fn loadKnxSummary(allocator: std.mem.Allocator, path: []const u8) !types.Knx
     errdefer build_spec.deinit(allocator);
 
     validator.validateBuildWriteIsolation(&workspace_spec, &build_spec) catch |err| {
-        return parse_errors.normalize(err);
+        return parse_errors.normalizeName(@errorName(err));
     };
 
     var output_spec = try validator.parseOutputSpecStrict(allocator, parsed.canonical_json);

@@ -176,7 +176,7 @@ fn downloadRemoteHttpWithRetries(
     var attempt: u8 = 0;
     while (attempt < attempts) : (attempt += 1) {
         downloadRemoteHttpAttempt(allocator, url, blob_path, options) catch |err| {
-            if (attempt + 1 >= attempts or !isRetryableDownloadError(err)) return err;
+            if (attempt + 1 >= attempts or !isRetryableDownloadErrorName(@errorName(err))) return err;
             const backoff_ms = @as(u64, 200) * (@as(u64, attempt) + 1);
             std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
             continue;
@@ -419,20 +419,27 @@ fn enforceDeadline(deadline_ms: ?u64) !void {
     }
 }
 
-fn isRetryableDownloadError(err: anyerror) bool {
-    return err == error.ConnectionTimedOut or
-        err == error.ConnectionResetByPeer or
-        err == error.ConnectionRefused or
-        err == error.NetworkUnreachable or
-        err == error.TemporaryNameServerFailure or
-        err == error.NameServerFailure or
-        err == error.HttpHeadersInvalid or
-        err == error.HttpHeadersOversize or
-        err == error.HttpChunkInvalid or
-        err == error.HttpChunkTruncated or
-        err == error.ReadFailed or
-        err == error.WriteFailed;
+fn isRetryableDownloadErrorName(err_name: []const u8) bool {
+    inline for (retryable_download_errors) |name| {
+        if (std.mem.eql(u8, err_name, name)) return true;
+    }
+    return false;
 }
+
+const retryable_download_errors = [_][]const u8{
+    "ConnectionTimedOut",
+    "ConnectionResetByPeer",
+    "ConnectionRefused",
+    "NetworkUnreachable",
+    "TemporaryNameServerFailure",
+    "NameServerFailure",
+    "HttpHeadersInvalid",
+    "HttpHeadersOversize",
+    "HttpChunkInvalid",
+    "HttpChunkTruncated",
+    "ReadFailed",
+    "WriteFailed",
+};
 
 fn mapHttpStatusToError(status: std.http.Status) HttpStatusError {
     return switch (status) {

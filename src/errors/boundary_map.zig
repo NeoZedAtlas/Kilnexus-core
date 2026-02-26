@@ -8,16 +8,16 @@ const Alias = struct {
     to: []const u8,
 };
 
-pub fn mapTrust(err: anyerror) mini_tuf.TrustError {
-    return mini_tuf.normalizeError(err);
+pub fn mapTrust(err_name: []const u8) mini_tuf.TrustError {
+    return mini_tuf.normalizeErrorName(err_name);
 }
 
-pub fn mapParse(err: anyerror) parse_errors.ParseError {
-    return parse_errors.normalize(err);
+pub fn mapParse(err_name: []const u8) parse_errors.ParseError {
+    return parse_errors.normalizeName(err_name);
 }
 
-pub fn mapIntegrity(err: anyerror) kx_error.IntegrityError {
-    return normalizeTo(kx_error.IntegrityError, err, &.{
+pub fn mapIntegrity(err_name: []const u8) kx_error.IntegrityError {
+    return normalizeTo(kx_error.IntegrityError, err_name, &.{
         .{ .from = "BlobHashMismatch", .to = "BlobMismatch" },
         .{ .from = "BlobDigestMismatch", .to = "BlobMismatch" },
         .{ .from = "TreeRootMismatch", .to = "TreeMismatch" },
@@ -28,8 +28,8 @@ pub fn mapIntegrity(err: anyerror) kx_error.IntegrityError {
     });
 }
 
-pub fn mapBuild(err: anyerror) kx_error.BuildError {
-    return normalizeTo(kx_error.BuildError, err, &.{
+pub fn mapBuild(err_name: []const u8) kx_error.BuildError {
+    return normalizeTo(kx_error.BuildError, err_name, &.{
         .{ .from = "OperatorExecutionFailed", .to = "OperatorFailed" },
         .{ .from = "OperatorNotAllowed", .to = "OperatorDisallowed" },
         .{ .from = "ToolchainNotFound", .to = "ToolchainMissing" },
@@ -41,15 +41,15 @@ pub fn mapBuild(err: anyerror) kx_error.BuildError {
     });
 }
 
-pub fn mapPublish(err: anyerror) kx_error.PublishError {
-    return normalizeTo(kx_error.PublishError, err, &.{
+pub fn mapPublish(err_name: []const u8) kx_error.PublishError {
+    return normalizeTo(kx_error.PublishError, err_name, &.{
         .{ .from = "AtomicRenameFailed", .to = "AtomicFailed" },
         .{ .from = "AccessDenied", .to = "PermissionDenied" },
     });
 }
 
-pub fn mapIo(err: anyerror) kx_error.IoError {
-    return normalizeTo(kx_error.IoError, err, &.{
+pub fn mapIo(err_name: []const u8) kx_error.IoError {
+    return normalizeTo(kx_error.IoError, err_name, &.{
         .{ .from = "IoNotFound", .to = "Unavailable" },
         .{ .from = "FileNotFound", .to = "Unavailable" },
         .{ .from = "IoAccessDenied", .to = "Denied" },
@@ -104,8 +104,8 @@ pub fn mapIo(err: anyerror) kx_error.IoError {
     });
 }
 
-fn normalizeTo(comptime Target: type, err: anyerror, comptime aliases: []const Alias) Target {
-    const resolved = resolveAliasName(@errorName(err), aliases);
+fn normalizeTo(comptime Target: type, err_name: []const u8, comptime aliases: []const Alias) Target {
+    const resolved = resolveAliasName(err_name, aliases);
     return errorFromName(Target, resolved) orelse error.Internal;
 }
 
@@ -126,20 +126,20 @@ fn errorFromName(comptime Target: type, name: []const u8) ?Target {
 }
 
 test "mapIo maps filesystem aliases" {
-    try std.testing.expect(mapIo(error.FileNotFound) == error.Unavailable);
-    try std.testing.expect(mapIo(error.PermissionDenied) == error.Denied);
-    try std.testing.expect(mapIo(error.NoSpaceLeft) == error.WriteFailed);
-    try std.testing.expect(mapIo(error.ConnectionTimedOut) == error.ReadFailed);
+    try std.testing.expect(mapIo("FileNotFound") == error.Unavailable);
+    try std.testing.expect(mapIo("PermissionDenied") == error.Denied);
+    try std.testing.expect(mapIo("NoSpaceLeft") == error.WriteFailed);
+    try std.testing.expect(mapIo("ConnectionTimedOut") == error.ReadFailed);
 }
 
 test "mapIntegrity maps legacy aliases" {
-    try std.testing.expect(mapIntegrity(error.BlobHashMismatch) == error.BlobMismatch);
-    try std.testing.expect(mapIntegrity(error.PathTraversalDetected) == error.PathTraversal);
+    try std.testing.expect(mapIntegrity("BlobHashMismatch") == error.BlobMismatch);
+    try std.testing.expect(mapIntegrity("PathTraversalDetected") == error.PathTraversal);
 }
 
 test "mapBuild and mapPublish map legacy aliases" {
-    try std.testing.expect(mapBuild(error.OperatorExecutionFailed) == error.OperatorFailed);
-    try std.testing.expect(mapBuild(error.DependencyCycle) == error.GraphInvalid);
-    try std.testing.expect(mapPublish(error.AtomicRenameFailed) == error.AtomicFailed);
-    try std.testing.expect(mapPublish(error.AccessDenied) == error.PermissionDenied);
+    try std.testing.expect(mapBuild("OperatorExecutionFailed") == error.OperatorFailed);
+    try std.testing.expect(mapBuild("DependencyCycle") == error.GraphInvalid);
+    try std.testing.expect(mapPublish("AtomicRenameFailed") == error.AtomicFailed);
+    try std.testing.expect(mapPublish("AccessDenied") == error.PermissionDenied);
 }

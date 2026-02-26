@@ -38,7 +38,7 @@ pub fn runWithOptions(allocator: std.mem.Allocator, source: []const u8, options:
 
 pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const u8, options: RunOptions) RunAttempt {
     const source = std.fs.cwd().readFileAlloc(allocator, path, max_knxfile_bytes) catch |err| {
-        const cause = boundary_map.mapIo(err);
+        const cause = boundary_map.mapIo(@errorName(err));
         return .{
             .failure = .{
                 .at = .init,
@@ -54,7 +54,7 @@ pub fn attemptRunFromPathWithOptions(allocator: std.mem.Allocator, path: []const
 pub fn attemptRunWithOptions(allocator: std.mem.Allocator, source: []const u8, options: RunOptions) RunAttempt {
     var failed_at: State = .init;
     const result = state_runner.runWithOptionsCore(allocator, source, options, &failed_at) catch |err| {
-        const cause = state_errors.translateCauseByState(failed_at, err);
+        const cause = state_errors.translateCauseByState(failed_at, @errorName(err));
         return .{
             .failure = .{
                 .at = failed_at,

@@ -15,9 +15,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     var summary = cli_summary.loadKnxSummary(allocator, cli.path) catch |err| {
         if (cli.json_output) {
-            try cli_output.printSimpleFailureJson(allocator, "plan", err);
+            try cli_output.printSimpleFailureJson(allocator, "plan", @errorName(err));
         } else {
-            cli_output.printSimpleFailureHuman("plan", err);
+            cli_output.printSimpleFailureHuman("plan", @errorName(err));
         }
         return error.InvalidCommand;
     };
