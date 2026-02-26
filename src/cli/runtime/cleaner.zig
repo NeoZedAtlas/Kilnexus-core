@@ -34,6 +34,48 @@ pub const CleanReport = struct {
     skipped_in_use: usize = 0,
     skipped_locked: usize = 0,
     errors: usize = 0,
+    error_items: []CleanError,
+    skipped_items: []CleanSkipItem,
+
+    pub fn deinit(self: *CleanReport, allocator: std.mem.Allocator) void {
+        for (self.error_items) |*item| item.deinit(allocator);
+        allocator.free(self.error_items);
+        for (self.skipped_items) |*item| item.deinit(allocator);
+        allocator.free(self.skipped_items);
+        self.* = undefined;
+    }
+};
+
+pub const ErrorPhase = enum {
+    move_to_trash,
+    delete_moved,
+};
+
+pub const CleanError = struct {
+    path: []u8,
+    phase: ErrorPhase,
+    reason: []u8,
+
+    fn deinit(self: *CleanError, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        allocator.free(self.reason);
+        self.* = undefined;
+    }
+};
+
+pub const SkipReason = enum {
+    in_use,
+    locked,
+};
+
+pub const CleanSkipItem = struct {
+    path: []u8,
+    reason: SkipReason,
+
+    fn deinit(self: *CleanSkipItem, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.* = undefined;
+    }
 };
 
 const Candidate = struct {
@@ -85,7 +127,23 @@ const LockGuard = struct {
 pub fn runClean(allocator: std.mem.Allocator, options: CleanOptions) !CleanReport {
     var report: CleanReport = .{
         .dry_run = !options.apply,
+        .error_items = &[_]CleanError{},
+        .skipped_items = &[_]CleanSkipItem{},
     };
+    var error_items: std.ArrayList(CleanError) = .empty;
+    var skipped_items: std.ArrayList(CleanSkipItem) = .empty;
+    var transferred_errors = false;
+    var transferred_skipped = false;
+    defer {
+        if (!transferred_errors) {
+            for (error_items.items) |*item| item.deinit(allocator);
+            error_items.deinit(allocator);
+        }
+        if (!transferred_skipped) {
+            for (skipped_items.items) |*item| item.deinit(allocator);
+            skipped_items.deinit(allocator);
+        }
+    }
 
     var refs = try readCurrentRefs(allocator, options.output_root);
     defer refs.deinit(allocator);
@@ -141,6 +199,7 @@ pub fn runClean(allocator: std.mem.Allocator, options: CleanOptions) !CleanRepor
 
         if (try isProtectedByCurrentRefs(allocator, candidate, options, &refs)) {
             report.skipped_in_use += 1;
+            try appendSkipItem(allocator, &skipped_items, candidate.path, .in_use);
             continue;
         }
 
@@ -153,24 +212,58 @@ pub fn runClean(allocator: std.mem.Allocator, options: CleanOptions) !CleanRepor
         const moved = moveToTrash(allocator, trash_root_base, candidate.path) catch |err| switch (err) {
             error.AccessDenied, error.PermissionDenied, error.SharingViolation => {
                 report.skipped_locked += 1;
+                try appendSkipItem(allocator, &skipped_items, candidate.path, .locked);
                 continue;
             },
             else => {
-                report.errors += 1;
+                try appendErrorItem(allocator, &error_items, candidate.path, .move_to_trash, err);
+                report.errors = error_items.items.len;
                 continue;
             },
         };
         defer allocator.free(moved);
 
-        deleteMovedPath(moved, candidate.is_dir) catch {
-            report.errors += 1;
+        deleteMovedPath(moved, candidate.is_dir) catch |err| {
+            try appendErrorItem(allocator, &error_items, moved, .delete_moved, err);
+            report.errors = error_items.items.len;
             continue;
         };
         report.deleted_objects += 1;
         report.deleted_bytes += candidate.bytes;
     }
 
+    report.error_items = try error_items.toOwnedSlice(allocator);
+    transferred_errors = true;
+    report.skipped_items = try skipped_items.toOwnedSlice(allocator);
+    transferred_skipped = true;
+    report.errors = report.error_items.len;
     return report;
+}
+
+fn appendErrorItem(
+    allocator: std.mem.Allocator,
+    error_items: *std.ArrayList(CleanError),
+    path: []const u8,
+    phase: ErrorPhase,
+    err: anyerror,
+) !void {
+    try error_items.append(allocator, .{
+        .path = try allocator.dupe(u8, path),
+        .phase = phase,
+        .reason = try allocator.dupe(u8, @errorName(err)),
+    });
+}
+
+fn appendSkipItem(
+    allocator: std.mem.Allocator,
+    skipped_items: *std.ArrayList(CleanSkipItem),
+    path: []const u8,
+    reason: SkipReason,
+) !void {
+    try skipped_items.append(allocator, .{
+        .path = try allocator.dupe(u8, path),
+        .reason = reason,
+    });
 }
 
 fn addReleaseCandidates(
