@@ -188,6 +188,27 @@ pub const io_aliases: []const Alias = &.{
     .{ .from = "WriteFailed", .to = "WriteFailed" },
 };
 
+pub const kx_classify_trust_aliases: []const Alias = &.{
+    .{ .from = "RolePolicyInvalid", .to = "RolePolicy" },
+    .{ .from = "SignatureThresholdNotMet", .to = "SignatureThreshold" },
+    .{ .from = "RollbackDetected", .to = "Rollback" },
+    .{ .from = "VersionLinkMismatch", .to = "VersionLink" },
+};
+
+pub const kx_classify_parse_aliases: []const Alias = &.{
+    .{ .from = "Canonicalization", .to = "Canonical" },
+};
+
+pub const kx_classify_io_aliases: []const Alias = &.{
+    .{ .from = "Unavailable", .to = "NotFound" },
+    .{ .from = "Denied", .to = "AccessDenied" },
+};
+
+pub const kx_classify_publish_aliases: []const Alias = &.{
+    .{ .from = "AtomicFailed", .to = "Atomic" },
+    .{ .from = "PermissionDenied", .to = "Permission" },
+};
+
 pub fn contains(err_name: []const u8, comptime names: []const []const u8) bool {
     inline for (names) |name| {
         if (std.mem.eql(u8, err_name, name)) return true;

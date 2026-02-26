@@ -1,6 +1,7 @@
 const std = @import("std");
 const parse_errors = @import("../parser/parse_errors.zig");
 const mini_tuf = @import("../trust/mini_tuf.zig");
+const error_names = @import("error_names.zig");
 
 pub const Family = enum {
     parse,
@@ -192,10 +193,7 @@ pub fn buildErrorId(
     ) catch "kx:id_overflow";
 }
 
-const AliasRule = struct {
-    from: []const u8,
-    to: []const u8,
-};
+const AliasRule = error_names.Alias;
 
 const Convention = struct {
     family: []const u8,
@@ -205,27 +203,17 @@ const Convention = struct {
 
 const trust_convention = Convention{
     .family = "TRUST",
-    .aliases = &.{
-        .{ .from = "RolePolicyInvalid", .to = "RolePolicy" },
-        .{ .from = "SignatureThresholdNotMet", .to = "SignatureThreshold" },
-        .{ .from = "RollbackDetected", .to = "Rollback" },
-        .{ .from = "VersionLinkMismatch", .to = "VersionLink" },
-    },
+    .aliases = error_names.kx_classify_trust_aliases,
 };
 
 const parse_convention = Convention{
     .family = "PARSE",
-    .aliases = &.{
-        .{ .from = "Canonicalization", .to = "Canonical" },
-    },
+    .aliases = error_names.kx_classify_parse_aliases,
 };
 
 const io_convention = Convention{
     .family = "IO",
-    .aliases = &.{
-        .{ .from = "Unavailable", .to = "NotFound" },
-        .{ .from = "Denied", .to = "AccessDenied" },
-    },
+    .aliases = error_names.kx_classify_io_aliases,
 };
 
 const integrity_convention = Convention{
@@ -238,10 +226,7 @@ const build_convention = Convention{
 
 const publish_convention = Convention{
     .family = "PUBLISH",
-    .aliases = &.{
-        .{ .from = "AtomicFailed", .to = "Atomic" },
-        .{ .from = "PermissionDenied", .to = "Permission" },
-    },
+    .aliases = error_names.kx_classify_publish_aliases,
 };
 
 pub fn classifyTrust(err: mini_tuf.TrustError) Code {
@@ -269,7 +254,7 @@ pub fn classifyPublish(err: PublishError) Code {
 }
 
 fn classifyByConvention(comptime convention: Convention, err_name: []const u8) Code {
-    const mapped = resolveAlias(convention.aliases, maybeStripPrefix(err_name, convention.strip_prefix));
+    const mapped = error_names.resolveAlias(maybeStripPrefix(err_name, convention.strip_prefix), convention.aliases);
     var code_buf: [128]u8 = undefined;
     const prefix = std.fmt.bufPrint(&code_buf, "KX_{s}_", .{convention.family}) catch return .KX_INTERNAL;
     const written = writeUpperSnake(code_buf[prefix.len..], mapped);
@@ -280,13 +265,6 @@ fn classifyByConvention(comptime convention: Convention, err_name: []const u8) C
 fn maybeStripPrefix(name: []const u8, maybe_prefix: ?[]const u8) []const u8 {
     const prefix = maybe_prefix orelse return name;
     if (std.mem.startsWith(u8, name, prefix)) return name[prefix.len..];
-    return name;
-}
-
-fn resolveAlias(comptime aliases: []const AliasRule, name: []const u8) []const u8 {
-    inline for (aliases) |alias| {
-        if (std.mem.eql(u8, name, alias.from)) return alias.to;
-    }
     return name;
 }
 
