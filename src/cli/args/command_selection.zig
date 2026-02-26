@@ -33,7 +33,12 @@ fn isKnownCommand(token: []const u8) bool {
     return std.mem.eql(u8, token, "build") or
         std.mem.eql(u8, token, "bootstrap") or
         std.mem.eql(u8, token, "validate") or
-        std.mem.eql(u8, token, "plan");
+        std.mem.eql(u8, token, "plan") or
+        std.mem.eql(u8, token, "graph") or
+        std.mem.eql(u8, token, "doctor") or
+        std.mem.eql(u8, token, "cache") or
+        std.mem.eql(u8, token, "toolchain") or
+        std.mem.eql(u8, token, "version");
 }
 
 fn parseNamedCommand(token: []const u8, args: []const []const u8) !types.CommandSelection {
@@ -45,6 +50,21 @@ fn parseNamedCommand(token: []const u8, args: []const []const u8) !types.Command
     }
     if (std.mem.eql(u8, token, "plan")) {
         return .{ .command = .plan, .args = args };
+    }
+    if (std.mem.eql(u8, token, "graph")) {
+        return .{ .command = .graph, .args = args };
+    }
+    if (std.mem.eql(u8, token, "doctor")) {
+        return .{ .command = .doctor, .args = args };
+    }
+    if (std.mem.eql(u8, token, "cache")) {
+        return .{ .command = .cache, .args = args };
+    }
+    if (std.mem.eql(u8, token, "toolchain")) {
+        return .{ .command = .toolchain, .args = args };
+    }
+    if (std.mem.eql(u8, token, "version")) {
+        return .{ .command = .version, .args = args };
     }
     return error.InvalidCommand;
 }
@@ -62,4 +82,11 @@ test "selectCommand supports knx prefix and defaults" {
     const default_build = try selectCommand(&.{"Knxfile"});
     try std.testing.expectEqual(types.CliCommand.build, default_build.command);
     try std.testing.expectEqual(@as(usize, 1), default_build.args.len);
+
+    const version_cmd = try selectCommand(&.{"version"});
+    try std.testing.expectEqual(types.CliCommand.version, version_cmd.command);
+
+    const graph_cmd = try selectCommand(&.{ "knx", "graph", "Knxfile" });
+    try std.testing.expectEqual(types.CliCommand.graph, graph_cmd.command);
+    try std.testing.expectEqual(@as(usize, 1), graph_cmd.args.len);
 }

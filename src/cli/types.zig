@@ -32,10 +32,36 @@ pub const ParseOnlyCliArgs = struct {
     json_output: bool = false,
 };
 
+pub const JsonOnlyCliArgs = struct {
+    json_output: bool = false,
+};
+
+pub const CacheCliArgs = struct {
+    cache_root: []const u8 = ".kilnexus-cache",
+    json_output: bool = false,
+};
+
+pub const ToolchainCliArgs = struct {
+    cache_root: []const u8 = ".kilnexus-cache",
+    json_output: bool = false,
+};
+
+pub const DoctorCliArgs = struct {
+    cache_root: []const u8 = ".kilnexus-cache",
+    output_root: []const u8 = "kilnexus-out",
+    trust_dir: ?[]const u8 = "trust",
+    json_output: bool = false,
+};
+
 pub const CliCommand = enum {
     build,
     validate,
     plan,
+    graph,
+    doctor,
+    cache,
+    toolchain,
+    version,
 };
 
 pub const CommandSelection = struct {
