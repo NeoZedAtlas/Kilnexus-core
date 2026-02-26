@@ -605,3 +605,139 @@ fn deleteMovedPath(path: []const u8, is_dir: bool) !void {
         try std.fs.cwd().deleteFile(path);
     }
 }
+
+test "runClean reports in-use skipped items for current toolchain and release" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path});
+    defer allocator.free(cache_root);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    defer allocator.free(output_root);
+
+    try std.fs.cwd().makePath(cache_root);
+    try std.fs.cwd().makePath(output_root);
+
+    const work_file = try std.fs.path.join(allocator, &.{ cache_root, "work", "build-1", "file.txt" });
+    defer allocator.free(work_file);
+    if (std.fs.path.dirname(work_file)) |parent| try std.fs.cwd().makePath(parent);
+    try std.fs.cwd().writeFile(.{ .sub_path = work_file, .data = "x" });
+
+    const tree_root = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const toolchain_file = try std.fs.path.join(allocator, &.{ cache_root, "cas", "official", "tree", tree_root, "zig.exe" });
+    defer allocator.free(toolchain_file);
+    if (std.fs.path.dirname(toolchain_file)) |parent| try std.fs.cwd().makePath(parent);
+    try std.fs.cwd().writeFile(.{ .sub_path = toolchain_file, .data = "x" });
+
+    const release_file = try std.fs.path.join(allocator, &.{ output_root, "releases", "build-1", "app.exe" });
+    defer allocator.free(release_file);
+    if (std.fs.path.dirname(release_file)) |parent| try std.fs.cwd().makePath(parent);
+    try std.fs.cwd().writeFile(.{ .sub_path = release_file, .data = "x" });
+
+    const pointer_path = try std.fmt.allocPrint(allocator, "{s}.current", .{output_root});
+    defer allocator.free(pointer_path);
+    const pointer_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"version\":2,\"build_id\":\"build-1\",\"release_rel\":\"releases/build-1\",\"verify_mode\":\"strict\",\"toolchain_tree_root\":\"{s}\"}}",
+        .{tree_root},
+    );
+    defer allocator.free(pointer_json);
+    try std.fs.cwd().writeFile(.{ .sub_path = pointer_path, .data = pointer_json });
+
+    var report = try runClean(allocator, .{
+        .cache_root = cache_root,
+        .output_root = output_root,
+        .scopes = cli_types.CleanScopeSet.all(),
+        .older_than_secs = 0,
+        .toolchain_tree_root = null,
+        .toolchain_prune = false,
+        .keep_last = 1,
+        .official_max_bytes = null,
+        .apply = false,
+    });
+    defer report.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), report.skipped_in_use);
+    try std.testing.expectEqual(@as(usize, 2), report.skipped_items.len);
+    try std.testing.expectEqual(@as(usize, 1), report.planned_objects);
+    try std.testing.expectEqual(@as(usize, 0), report.errors);
+
+    var saw_toolchain = false;
+    var saw_release = false;
+    for (report.skipped_items) |item| {
+        try std.testing.expectEqual(SkipReason.in_use, item.reason);
+        if (std.mem.indexOf(u8, item.path, tree_root) != null) saw_toolchain = true;
+        if (std.mem.indexOf(u8, item.path, "releases") != null) saw_release = true;
+    }
+    try std.testing.expect(saw_toolchain);
+    try std.testing.expect(saw_release);
+}
+
+test "runClean returns CleanLocked when lock already exists" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path});
+    defer allocator.free(cache_root);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    defer allocator.free(output_root);
+
+    const lock_path = try std.fs.path.join(allocator, &.{ cache_root, ".locks", "clean.lock" });
+    defer allocator.free(lock_path);
+    try std.fs.cwd().makePath(lock_path);
+
+    try std.testing.expectError(error.CleanLocked, runClean(allocator, .{
+        .cache_root = cache_root,
+        .output_root = output_root,
+        .scopes = cli_types.CleanScopeSet.default(),
+        .older_than_secs = 0,
+        .toolchain_tree_root = null,
+        .toolchain_prune = false,
+        .keep_last = 1,
+        .official_max_bytes = null,
+        .apply = true,
+    }));
+}
+
+test "runClean records error_items when move_to_trash fails" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{tmp.sub_path});
+    defer allocator.free(cache_root);
+    const output_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/out", .{tmp.sub_path});
+    defer allocator.free(output_root);
+
+    const work_file = try std.fs.path.join(allocator, &.{ cache_root, "work", "build-1", "file.txt" });
+    defer allocator.free(work_file);
+    if (std.fs.path.dirname(work_file)) |parent| try std.fs.cwd().makePath(parent);
+    try std.fs.cwd().writeFile(.{ .sub_path = work_file, .data = "x" });
+
+    // Force moveToTrash(makePath) to fail by occupying ".trash" with a file.
+    const trash_file = try std.fs.path.join(allocator, &.{ cache_root, ".trash" });
+    defer allocator.free(trash_file);
+    if (std.fs.path.dirname(trash_file)) |parent| try std.fs.cwd().makePath(parent);
+    try std.fs.cwd().writeFile(.{ .sub_path = trash_file, .data = "not-a-dir" });
+
+    var report = try runClean(allocator, .{
+        .cache_root = cache_root,
+        .output_root = output_root,
+        .scopes = cli_types.CleanScopeSet.default(),
+        .older_than_secs = 0,
+        .toolchain_tree_root = null,
+        .toolchain_prune = false,
+        .keep_last = 1,
+        .official_max_bytes = null,
+        .apply = true,
+    });
+    defer report.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), report.planned_objects);
+    try std.testing.expectEqual(@as(usize, 0), report.deleted_objects);
+    try std.testing.expectEqual(@as(usize, 1), report.errors);
+    try std.testing.expectEqual(@as(usize, 1), report.error_items.len);
+    try std.testing.expectEqual(ErrorPhase.move_to_trash, report.error_items[0].phase);
+}
