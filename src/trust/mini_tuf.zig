@@ -115,54 +115,79 @@ pub fn enforceRollback(previous: VerificationSummary, current: VerificationSumma
     if (current.targets_version < previous.targets_version) return error.RollbackDetected;
 }
 
+const Alias = struct {
+    from: []const u8,
+    to: []const u8,
+};
+
+const trust_aliases: []const Alias = &.{
+    .{ .from = "FileNotFound", .to = "MetadataMissing" },
+    .{ .from = "ExpectedObject", .to = "MetadataMalformed" },
+    .{ .from = "ExpectedArray", .to = "MetadataMalformed" },
+    .{ .from = "ExpectedString", .to = "MetadataMalformed" },
+    .{ .from = "ExpectedInteger", .to = "MetadataMalformed" },
+    .{ .from = "MissingRequiredField", .to = "MetadataMalformed" },
+    .{ .from = "MissingSignedSection", .to = "MetadataMalformed" },
+    .{ .from = "MissingSignaturesSection", .to = "MetadataMalformed" },
+    .{ .from = "MissingRoleRule", .to = "RolePolicyInvalid" },
+    .{ .from = "InvalidRoleType", .to = "RolePolicyInvalid" },
+    .{ .from = "InvalidThreshold", .to = "RolePolicyInvalid" },
+    .{ .from = "EmptyRoleKeyIds", .to = "RolePolicyInvalid" },
+    .{ .from = "EmptyRoleKeyId", .to = "RolePolicyInvalid" },
+    .{ .from = "InvalidSignatureEntry", .to = "RolePolicyInvalid" },
+    .{ .from = "EmptySignatures", .to = "RolePolicyInvalid" },
+    .{ .from = "UnsupportedKeyType", .to = "KeyUnsupported" },
+    .{ .from = "UnsupportedSignatureScheme", .to = "KeyUnsupported" },
+    .{ .from = "SignatureVerificationFailed", .to = "SignatureInvalid" },
+    .{ .from = "EncodingError", .to = "SignatureInvalid" },
+    .{ .from = "IdentityElement", .to = "SignatureInvalid" },
+    .{ .from = "WeakPublicKey", .to = "SignatureInvalid" },
+    .{ .from = "NonCanonical", .to = "SignatureInvalid" },
+    .{ .from = "InvalidHexLength", .to = "SignatureInvalid" },
+    .{ .from = "InvalidCharacter", .to = "SignatureInvalid" },
+    .{ .from = "InvalidTimestampFormat", .to = "MetadataExpired" },
+    .{ .from = "InvalidTimestampYear", .to = "MetadataExpired" },
+    .{ .from = "InvalidTimestampMonth", .to = "MetadataExpired" },
+    .{ .from = "InvalidTimestampDay", .to = "MetadataExpired" },
+    .{ .from = "InvalidTimestampClock", .to = "MetadataExpired" },
+    .{ .from = "LinkedMetadataVersionMismatch", .to = "VersionLinkMismatch" },
+    .{ .from = "InvalidLinkedVersion", .to = "VersionLinkMismatch" },
+    .{ .from = "MissingLinkedMetadata", .to = "VersionLinkMismatch" },
+    .{ .from = "InvalidMetadataVersion", .to = "VersionInvalid" },
+    .{ .from = "InvalidStateVersion", .to = "StateInvalid" },
+    .{ .from = "AccessDenied", .to = "StateIo" },
+    .{ .from = "PermissionDenied", .to = "StateIo" },
+    .{ .from = "ReadOnlyFileSystem", .to = "StateIo" },
+    .{ .from = "NoSpaceLeft", .to = "StateIo" },
+    .{ .from = "DiskQuota", .to = "StateIo" },
+    .{ .from = "FileBusy", .to = "StateIo" },
+    .{ .from = "InputOutput", .to = "StateIo" },
+    .{ .from = "RenameAcrossMountPoints", .to = "StateIo" },
+};
+
 pub fn normalizeError(err: anyerror) TrustError {
-    if (err == error.MetadataMissing or err == error.FileNotFound) {
-        return error.MetadataMissing;
+    return normalizeTo(TrustError, err, trust_aliases);
+}
+
+fn normalizeTo(comptime Target: type, err: anyerror, comptime aliases: []const Alias) Target {
+    const resolved = resolveAliasName(@errorName(err), aliases);
+    return errorFromName(Target, resolved) orelse error.Internal;
+}
+
+fn resolveAliasName(name: []const u8, comptime aliases: []const Alias) []const u8 {
+    inline for (aliases) |alias| {
+        if (std.mem.eql(u8, name, alias.from)) return alias.to;
     }
+    return name;
+}
 
-    if (err == error.MetadataMalformed or err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger or err == error.MissingRequiredField or err == error.MissingSignedSection or err == error.MissingSignaturesSection) {
-        return error.MetadataMalformed;
+fn errorFromName(comptime Target: type, name: []const u8) ?Target {
+    inline for (@typeInfo(Target).error_set.?) |field| {
+        if (std.mem.eql(u8, name, field.name)) {
+            return @field(Target, field.name);
+        }
     }
-
-    if (err == error.RolePolicyInvalid or err == error.MissingRoleRule or err == error.InvalidRoleType or err == error.InvalidThreshold or err == error.EmptyRoleKeyIds or err == error.EmptyRoleKeyId or err == error.InvalidSignatureEntry or err == error.EmptySignatures) {
-        return error.RolePolicyInvalid;
-    }
-
-    if (err == error.KeyUnsupported or err == error.UnsupportedKeyType or err == error.UnsupportedSignatureScheme) {
-        return error.KeyUnsupported;
-    }
-
-    if (err == error.SignatureInvalid or err == error.SignatureVerificationFailed or err == error.EncodingError or err == error.IdentityElement or err == error.WeakPublicKey or err == error.NonCanonical or err == error.InvalidHexLength or err == error.InvalidCharacter) {
-        return error.SignatureInvalid;
-    }
-
-    if (err == error.SignatureThresholdNotMet) {
-        return error.SignatureThresholdNotMet;
-    }
-
-    if (err == error.MetadataExpired or err == error.InvalidTimestampFormat or err == error.InvalidTimestampYear or err == error.InvalidTimestampMonth or err == error.InvalidTimestampDay or err == error.InvalidTimestampClock) {
-        return error.MetadataExpired;
-    }
-
-    if (err == error.RollbackDetected) return error.RollbackDetected;
-
-    if (err == error.VersionLinkMismatch or err == error.LinkedMetadataVersionMismatch or err == error.InvalidLinkedVersion or err == error.MissingLinkedMetadata) {
-        return error.VersionLinkMismatch;
-    }
-
-    if (err == error.VersionInvalid or err == error.InvalidMetadataVersion) {
-        return error.VersionInvalid;
-    }
-
-    if (err == error.StateInvalid or err == error.InvalidStateVersion) {
-        return error.StateInvalid;
-    }
-
-    if (err == error.StateIo or err == error.AccessDenied or err == error.PermissionDenied or err == error.ReadOnlyFileSystem or err == error.NoSpaceLeft or err == error.DiskQuota or err == error.FileBusy or err == error.InputOutput or err == error.RenameAcrossMountPoints) {
-        return error.StateIo;
-    }
-
-    return error.Internal;
+    return null;
 }
 
 const max_role_file_bytes: usize = 2 * 1024 * 1024;

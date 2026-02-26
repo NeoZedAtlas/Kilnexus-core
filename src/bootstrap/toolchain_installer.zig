@@ -227,6 +227,14 @@ const Source = union(enum) {
     https_url: []const u8,
 };
 
+const HttpStatusError = error{
+    FileNotFound,
+    AccessDenied,
+    ConnectionTimedOut,
+    ConnectionResetByPeer,
+    Unexpected,
+};
+
 fn parseSource(source: []const u8) !Source {
     if (std.mem.startsWith(u8, source, "file://")) {
         return .{ .file_path = source["file://".len..] };
@@ -317,7 +325,7 @@ fn downloadHttpAttempt(self: *InstallSession, url: []const u8, hard_cap: u64) !v
     try atomic_file.finish();
 }
 
-fn mapHttpStatusToError(status: std.http.Status) anyerror {
+fn mapHttpStatusToError(status: std.http.Status) HttpStatusError {
     return switch (status) {
         .not_found => error.FileNotFound,
         .unauthorized, .forbidden => error.AccessDenied,

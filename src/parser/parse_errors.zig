@@ -15,44 +15,62 @@ pub const ParseError = error{
     Internal,
 };
 
+const Alias = struct {
+    from: []const u8,
+    to: []const u8,
+};
+
+const parse_aliases: []const Alias = &.{
+    .{ .from = "Parse", .to = "Syntax" },
+    .{ .from = "UnsupportedFloatInCanonicalization", .to = "Canonicalization" },
+    .{ .from = "InvalidCanonicalObject", .to = "Canonicalization" },
+    .{ .from = "MissingRequiredField", .to = "MissingField" },
+    .{ .from = "MissingVersion", .to = "MissingField" },
+    .{ .from = "ExpectedObject", .to = "TypeMismatch" },
+    .{ .from = "ExpectedArray", .to = "TypeMismatch" },
+    .{ .from = "ExpectedString", .to = "TypeMismatch" },
+    .{ .from = "ExpectedInteger", .to = "TypeMismatch" },
+    .{ .from = "InvalidHexLength", .to = "ValueInvalid" },
+    .{ .from = "InvalidHexChar", .to = "ValueInvalid" },
+    .{ .from = "InvalidPositiveInt", .to = "ValueInvalid" },
+    .{ .from = "InvalidPolicyNetwork", .to = "ValueInvalid" },
+    .{ .from = "InvalidPolicyClock", .to = "ValueInvalid" },
+    .{ .from = "InvalidEnvTZ", .to = "ValueInvalid" },
+    .{ .from = "InvalidEnvLang", .to = "ValueInvalid" },
+    .{ .from = "InvalidDigits", .to = "ValueInvalid" },
+    .{ .from = "InvalidVerifyMode", .to = "ValueInvalid" },
+    .{ .from = "EmptyString", .to = "ValueInvalid" },
+    .{ .from = "InvalidBuildGraph", .to = "ValueInvalid" },
+    .{ .from = "UnsupportedVersion", .to = "VersionUnsupported" },
+    .{ .from = "OperatorNotAllowed", .to = "OperatorDisallowed" },
+    .{ .from = "OutputsEmpty", .to = "OutputInvalid" },
+    .{ .from = "InvalidOutputPath", .to = "OutputInvalid" },
+    .{ .from = "InvalidMode", .to = "OutputInvalid" },
+};
+
 pub fn normalize(err: anyerror) ParseError {
-    if (err == error.EmptyInput) return error.EmptyInput;
-    if (err == error.Syntax or err == error.Parse) return error.Syntax;
-    if (err == error.Schema) return error.Schema;
+    return normalizeTo(ParseError, err, parse_aliases);
+}
 
-    if (err == error.Canonicalization or err == error.UnsupportedFloatInCanonicalization or err == error.InvalidCanonicalObject) {
-        return error.Canonicalization;
+fn normalizeTo(comptime Target: type, err: anyerror, comptime aliases: []const Alias) Target {
+    const resolved = resolveAliasName(@errorName(err), aliases);
+    return errorFromName(Target, resolved) orelse error.Internal;
+}
+
+fn resolveAliasName(name: []const u8, comptime aliases: []const Alias) []const u8 {
+    inline for (aliases) |alias| {
+        if (std.mem.eql(u8, name, alias.from)) return alias.to;
     }
+    return name;
+}
 
-    if (err == error.MissingField or err == error.MissingRequiredField or err == error.MissingVersion) {
-        return error.MissingField;
+fn errorFromName(comptime Target: type, name: []const u8) ?Target {
+    inline for (@typeInfo(Target).error_set.?) |field| {
+        if (std.mem.eql(u8, name, field.name)) {
+            return @field(Target, field.name);
+        }
     }
-
-    if (err == error.TypeMismatch or err == error.ExpectedObject or err == error.ExpectedArray or err == error.ExpectedString or err == error.ExpectedInteger) {
-        return error.TypeMismatch;
-    }
-
-    if (err == error.ValueInvalid or err == error.InvalidHexLength or err == error.InvalidHexChar or err == error.InvalidPositiveInt or err == error.InvalidPolicyNetwork or err == error.InvalidPolicyClock or err == error.InvalidEnvTZ or err == error.InvalidEnvLang or err == error.InvalidDigits or err == error.InvalidVerifyMode or err == error.EmptyString or err == error.InvalidBuildGraph) {
-        return error.ValueInvalid;
-    }
-
-    if (err == error.VersionUnsupported or err == error.UnsupportedVersion) {
-        return error.VersionUnsupported;
-    }
-
-    if (err == error.OperatorDisallowed or err == error.OperatorNotAllowed) {
-        return error.OperatorDisallowed;
-    }
-
-    if (err == error.OutputInvalid or err == error.OutputsEmpty or err == error.InvalidOutputPath or err == error.InvalidMode) {
-        return error.OutputInvalid;
-    }
-
-    if (err == error.LegacyBuildBlock) {
-        return error.LegacyBuildBlock;
-    }
-
-    return error.Internal;
+    return null;
 }
 
 test "normalize maps parser and validator errors into canonical parse errors" {

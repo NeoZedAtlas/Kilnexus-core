@@ -26,6 +26,14 @@ const BlobFormat = enum {
     zip,
 };
 
+const HttpStatusError = error{
+    FileNotFound,
+    AccessDenied,
+    ConnectionTimedOut,
+    ConnectionResetByPeer,
+    Unexpected,
+};
+
 pub fn prepareRemoteInputs(
     allocator: std.mem.Allocator,
     workspace_spec: *const validator.WorkspaceSpec,
@@ -426,7 +434,7 @@ fn isRetryableDownloadError(err: anyerror) bool {
         err == error.WriteFailed;
 }
 
-fn mapHttpStatusToError(status: std.http.Status) anyerror {
+fn mapHttpStatusToError(status: std.http.Status) HttpStatusError {
     return switch (status) {
         .not_found => error.FileNotFound,
         .unauthorized, .forbidden => error.AccessDenied,
