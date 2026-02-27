@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli_args = @import("../args.zig");
+const cli_output = @import("../output.zig");
 const cli_types = @import("../types.zig");
 const cleaner = @import("../runtime/cleaner.zig");
 
@@ -26,9 +27,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .apply = cli.apply,
     }) catch |err| {
         if (cli.json_output) {
-            try printErrorJson(allocator, @errorName(err));
+            try cli_output.printSimpleFailureJson(allocator, "clean", @errorName(err));
         } else {
-            std.debug.print("clean failed: {s}\n", .{@errorName(err)});
+            cli_output.printSimpleFailureHuman("clean", @errorName(err));
         }
         return err;
     };
@@ -135,20 +136,6 @@ fn printJson(allocator: std.mem.Allocator, cli: cli_types.CleanCliArgs, report: 
     try writer.writeAll("]");
     try writer.writeAll(",\"duration_ms\":");
     try writer.print("{}", .{duration_ms});
-    try writer.writeAll("}\n");
-    try writer.flush();
-    std.debug.print("{s}", .{out.items});
-}
-
-fn printErrorJson(allocator: std.mem.Allocator, err_name: []const u8) !void {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    var out_writer = out.writer(allocator);
-    var out_buffer: [512]u8 = undefined;
-    var out_adapter = out_writer.adaptToNewApi(&out_buffer);
-    const writer = &out_adapter.new_interface;
-    try writer.writeAll("{\"status\":\"failed\",\"command\":\"clean\",\"error\":");
-    try std.json.Stringify.encodeJsonString(err_name, .{}, writer);
     try writer.writeAll("}\n");
     try writer.flush();
     std.debug.print("{s}", .{out.items});

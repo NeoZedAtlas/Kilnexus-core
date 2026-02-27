@@ -1,4 +1,6 @@
 const std = @import("std");
+const kx_error = @import("../../errors/kx_error.zig");
+const boundary_map = @import("../../errors/boundary_map.zig");
 
 pub fn printUsage() void {
     std.debug.print(
@@ -23,10 +25,25 @@ pub fn printUsage() void {
 }
 
 pub fn printSimpleFailureHuman(command: []const u8, err_name: []const u8) void {
-    std.debug.print("{s} failed: {s}\n", .{ command, err_name });
+    const code = classifyCliError(err_name);
+    const descriptor = kx_error.describe(code);
+    var error_id_buf: [128]u8 = undefined;
+    const error_id = kx_error.buildErrorId(&error_id_buf, code, command, err_name);
+
+    std.debug.print("{s} failed\n", .{command});
+    std.debug.print("Error id: {s}\n", .{error_id});
+    std.debug.print("Code: {s} ({d})\n", .{ @tagName(code), @intFromEnum(code) });
+    std.debug.print("Family: {s}\n", .{@tagName(descriptor.family)});
+    std.debug.print("Cause: {s}\n", .{err_name});
+    std.debug.print("Summary: {s}\n", .{descriptor.summary});
 }
 
 pub fn printSimpleFailureJson(allocator: std.mem.Allocator, command: []const u8, err_name: []const u8) !void {
+    const code = classifyCliError(err_name);
+    const descriptor = kx_error.describe(code);
+    var error_id_buf: [128]u8 = undefined;
+    const error_id = kx_error.buildErrorId(&error_id_buf, code, command, err_name);
+
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var out_writer = out.writer(allocator);
@@ -36,9 +53,49 @@ pub fn printSimpleFailureJson(allocator: std.mem.Allocator, command: []const u8,
 
     try writer.writeAll("{\"status\":\"failed\",\"command\":");
     try std.json.Stringify.encodeJsonString(command, .{}, writer);
+    try writer.writeAll(",\"error_id\":");
+    try std.json.Stringify.encodeJsonString(error_id, .{}, writer);
+    try writer.writeAll(",\"code\":");
+    try std.json.Stringify.encodeJsonString(@tagName(code), .{}, writer);
+    try writer.writeAll(",\"code_num\":");
+    try writer.print("{d}", .{@intFromEnum(code)});
+    try writer.writeAll(",\"family\":");
+    try std.json.Stringify.encodeJsonString(@tagName(descriptor.family), .{}, writer);
+    try writer.writeAll(",\"summary\":");
+    try std.json.Stringify.encodeJsonString(descriptor.summary, .{}, writer);
+    try writer.writeAll(",\"cause\":");
+    try std.json.Stringify.encodeJsonString(err_name, .{}, writer);
     try writer.writeAll(",\"error\":");
     try std.json.Stringify.encodeJsonString(err_name, .{}, writer);
     try writer.writeAll("}\n");
     try writer.flush();
     std.debug.print("{s}", .{out.items});
+}
+
+fn classifyCliError(err_name: []const u8) kx_error.Code {
+    const parse = boundary_map.mapParse(err_name);
+    if (parse != error.Internal) return kx_error.classifyParse(parse);
+
+    const io = boundary_map.mapIo(err_name);
+    if (io != error.Internal) return kx_error.classifyIo(io);
+
+    const trust = boundary_map.mapTrust(err_name);
+    if (trust != error.Internal) return kx_error.classifyTrust(trust);
+
+    const integrity = boundary_map.mapIntegrity(err_name);
+    if (integrity != error.Internal) return kx_error.classifyIntegrity(integrity);
+
+    const build = boundary_map.mapBuild(err_name);
+    if (build != error.Internal) return kx_error.classifyBuild(build);
+
+    const publish = boundary_map.mapPublish(err_name);
+    if (publish != error.Internal) return kx_error.classifyPublish(publish);
+
+    return .KX_INTERNAL;
+}
+
+test "classifyCliError prioritizes parse and io families" {
+    try std.testing.expectEqual(kx_error.Code.KX_PARSE_SYNTAX, classifyCliError("Parse"));
+    try std.testing.expectEqual(kx_error.Code.KX_IO_NOT_FOUND, classifyCliError("FileNotFound"));
+    try std.testing.expectEqual(kx_error.Code.KX_INTERNAL, classifyCliError("SomeUnknownError"));
 }
