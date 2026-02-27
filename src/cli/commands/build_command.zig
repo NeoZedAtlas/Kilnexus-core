@@ -1,8 +1,10 @@
 const std = @import("std");
 const bootstrap = @import("../../bootstrap/state_machine.zig");
+const abi_parser = @import("../../parser/abi_parser.zig");
+const validator = @import("../../knx/validator.zig");
+const v2_infer = @import("../runtime/v2_lock_infer.zig");
 const cli_args = @import("../args.zig");
 const cli_output = @import("../output.zig");
-const cli_summary = @import("../summary.zig");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const cli = cli_args.parseBootstrapCliArgs(args) catch |err| {
@@ -103,15 +105,51 @@ fn resolveBuildPathWithLockPolicy(allocator: std.mem.Allocator, path: []const u8
 
 fn validateLockDrift(allocator: std.mem.Allocator, knx_path: []const u8, lock_path: []const u8) !void {
     if (!try pathExists(knx_path)) return;
-
-    var knx_summary = try cli_summary.loadKnxSummary(allocator, knx_path);
-    defer knx_summary.deinit(allocator);
-    var lock_summary = try cli_summary.loadKnxSummary(allocator, lock_path);
-    defer lock_summary.deinit(allocator);
-
-    if (!std.mem.eql(u8, knx_summary.knx_digest_hex[0..], lock_summary.knx_digest_hex[0..])) {
+    const knx_digest = try computeExpectedLockDigestHexFromKnxPath(allocator, knx_path);
+    const lock_digest = try computeCanonicalDigestHexFromPath(allocator, lock_path);
+    if (!std.mem.eql(u8, knx_digest[0..], lock_digest[0..])) {
         return error.LockDrift;
     }
+}
+
+fn computeExpectedLockDigestHexFromKnxPath(allocator: std.mem.Allocator, path: []const u8) ![64]u8 {
+    const source = try std.fs.cwd().readFileAlloc(allocator, path, @import("../types.zig").max_knxfile_bytes);
+    defer allocator.free(source);
+    const parsed = try abi_parser.parseLockfileStrict(allocator, source);
+    defer allocator.free(parsed.canonical_json);
+
+    const version = try parseVersion(parsed.canonical_json);
+    switch (version) {
+        1 => return validator.computeKnxDigestHex(parsed.canonical_json),
+        2 => {
+            const inferred = try v2_infer.inferLockCanonicalJsonFromV2Canonical(allocator, parsed.canonical_json);
+            defer allocator.free(inferred);
+            return validator.computeKnxDigestHex(inferred);
+        },
+        else => return error.VersionUnsupported,
+    }
+}
+
+fn computeCanonicalDigestHexFromPath(allocator: std.mem.Allocator, path: []const u8) ![64]u8 {
+    const source = try std.fs.cwd().readFileAlloc(allocator, path, @import("../types.zig").max_knxfile_bytes);
+    defer allocator.free(source);
+    const parsed = try abi_parser.parseLockfileStrict(allocator, source);
+    defer allocator.free(parsed.canonical_json);
+    return validator.computeKnxDigestHex(parsed.canonical_json);
+}
+
+fn parseVersion(canonical_json: []const u8) !i64 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, canonical_json, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return error.TypeMismatch,
+    };
+    const version_value = root.get("version") orelse return error.MissingField;
+    return switch (version_value) {
+        .integer => |num| num,
+        else => error.TypeMismatch,
+    };
 }
 
 fn pathExists(path: []const u8) !bool {

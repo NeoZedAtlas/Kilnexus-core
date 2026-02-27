@@ -181,7 +181,31 @@ pub fn isAllowedCompileArg(arg: []const u8) bool {
     for (allowed) |item| {
         if (std.mem.eql(u8, arg, item)) return true;
     }
+    if (std.mem.startsWith(u8, arg, "-D")) {
+        return isAllowedDefine(arg[2..]);
+    }
+    if (std.mem.startsWith(u8, arg, "-I")) {
+        return isAllowedIncludePath(arg[2..]);
+    }
     return false;
+}
+
+fn isAllowedDefine(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |ch| {
+        if (std.ascii.isAlphanumeric(ch)) continue;
+        switch (ch) {
+            '_', '=', '.', '-', ':' => continue,
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn isAllowedIncludePath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    validateWorkspaceRelativePath(path) catch return false;
+    return true;
 }
 
 pub fn isAllowedLinkArg(arg: []const u8) bool {
@@ -316,4 +340,14 @@ pub fn parseHexFixed(comptime byte_len: usize, text: []const u8) ![byte_len]u8 {
         error.NoSpaceLeft => return error.InvalidHexLength,
     };
     return output;
+}
+
+test "isAllowedCompileArg accepts constrained -D and -I" {
+    try std.testing.expect(isAllowedCompileArg("-DHELLO=1"));
+    try std.testing.expect(isAllowedCompileArg("-DNAME=value-1"));
+    try std.testing.expect(isAllowedCompileArg("-Isrc/include"));
+    try std.testing.expect(!isAllowedCompileArg("-D"));
+    try std.testing.expect(!isAllowedCompileArg("-DHELLO value"));
+    try std.testing.expect(!isAllowedCompileArg("-I../include"));
+    try std.testing.expect(!isAllowedCompileArg("-I"));
 }
