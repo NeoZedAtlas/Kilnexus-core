@@ -11,7 +11,7 @@ pub fn printUsage() void {
     std.debug.print("Knxfile path must be extensionless (no .toml).\n", .{});
     std.debug.print("build positional: [Knxfile] [trust-dir] [cache-root] [output-root]\n", .{});
     std.debug.print(
-        "build options: --knxfile <path> --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --json --help\n",
+        "build options: --knxfile <path> --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --json --help (defaults to <Knxfile>.lock)\n",
         .{},
     );
     std.debug.print("freeze options: [Knxfile] [Knxfile.lock] --knxfile <path> --lockfile <path> --json --help\n", .{});

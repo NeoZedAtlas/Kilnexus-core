@@ -27,6 +27,8 @@ pub const BuildError = error{
     GraphInvalid,
     Timeout,
     NotImplemented,
+    LockMissing,
+    LockDrift,
     Internal,
 };
 
