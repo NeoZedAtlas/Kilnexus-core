@@ -32,6 +32,12 @@ pub const ParseOnlyCliArgs = struct {
     json_output: bool = false,
 };
 
+pub const FreezeCliArgs = struct {
+    path: []const u8 = "Knxfile",
+    lock_path: ?[]const u8 = null,
+    json_output: bool = false,
+};
+
 pub const JsonOnlyCliArgs = struct {
     json_output: bool = false,
 };
@@ -95,6 +101,7 @@ pub const CleanCliArgs = struct {
 
 pub const CliCommand = enum {
     build,
+    freeze,
     validate,
     plan,
     graph,

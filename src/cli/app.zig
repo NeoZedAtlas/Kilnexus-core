@@ -3,6 +3,7 @@ const cli_args = @import("args.zig");
 const cli_types = @import("types.zig");
 const cli_output = @import("output.zig");
 const build_command = @import("commands/build_command.zig");
+const freeze_command = @import("commands/freeze_command.zig");
 const validate_command = @import("commands/validate_command.zig");
 const plan_command = @import("commands/plan_command.zig");
 const graph_command = @import("commands/graph_command.zig");
@@ -43,6 +44,7 @@ pub fn runMain() !void {
 
     switch (selection.command) {
         .build => try build_command.run(allocator, selection.args),
+        .freeze => try freeze_command.run(allocator, selection.args),
         .validate => try validate_command.run(allocator, selection.args),
         .plan => try plan_command.run(allocator, selection.args),
         .graph => try graph_command.run(allocator, selection.args),
@@ -59,6 +61,7 @@ test {
     _ = cli_output;
     _ = cli_types;
     _ = build_command;
+    _ = freeze_command;
     _ = validate_command;
     _ = plan_command;
     _ = graph_command;
