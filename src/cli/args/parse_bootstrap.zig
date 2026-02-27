@@ -22,6 +22,10 @@ pub fn parseBootstrapCliArgs(args: []const []const u8) !types.BootstrapCliArgs {
                 output.json_output = true;
                 continue;
             }
+            if (std.mem.eql(u8, arg, "--allow-unlocked")) {
+                output.allow_unlocked = true;
+                continue;
+            }
             if (std.mem.eql(u8, arg, "--knxfile")) {
                 output.path = try common.nextOptionValue(args, &i);
                 path_set = true;
@@ -115,15 +119,18 @@ test "parseBootstrapCliArgs applies defaults and optional overrides" {
     try std.testing.expectEqualStrings("custom-trust", custom.trust_dir.?);
     try std.testing.expectEqualStrings("cache-dir", custom.cache_root);
     try std.testing.expectEqualStrings("out-dir", custom.output_root);
+    try std.testing.expect(!custom.allow_unlocked);
 }
 
 test "parseBootstrapCliArgs accepts --knxfile option" {
     const parsed = try parseBootstrapCliArgs(&.{
         "--knxfile",
         "Knxfile.prod",
+        "--allow-unlocked",
         "--json",
     });
     try std.testing.expectEqualStrings("Knxfile.prod", parsed.path);
+    try std.testing.expect(parsed.allow_unlocked);
     try std.testing.expect(parsed.json_output);
 }
 

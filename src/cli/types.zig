@@ -24,6 +24,7 @@ pub const BootstrapCliArgs = struct {
     trust_state_path: ?[]const u8 = ".kilnexus-trust-state.json",
     cache_root: []const u8 = ".kilnexus-cache",
     output_root: []const u8 = "kilnexus-out",
+    allow_unlocked: bool = false,
     json_output: bool = false,
 };
 

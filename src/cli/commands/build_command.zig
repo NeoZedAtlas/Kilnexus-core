@@ -30,14 +30,16 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").BootstrapCliArgs) !void {
-    const resolved_path = try resolveBuildPathWithLockPolicy(allocator, cli.path);
-    defer if (!std.mem.eql(u8, resolved_path, cli.path)) allocator.free(resolved_path);
+    const resolved = try resolveBuildPathWithLockPolicy(allocator, cli.path, cli.allow_unlocked);
+    defer if (resolved.needs_free) allocator.free(resolved.path);
 
-    if (!hasLockSuffixIgnoreCase(cli.path)) {
-        try validateLockDrift(allocator, cli.path, resolved_path);
+    if (resolved.using_lock and !hasLockSuffixIgnoreCase(cli.path)) {
+        try validateLockDrift(allocator, cli.path, resolved.path);
+    } else if (!resolved.using_lock and !cli.json_output) {
+        std.debug.print("Warning: building unlocked from {s}; reproducibility lock is bypassed.\n", .{cli.path});
     }
 
-    var attempt = bootstrap.attemptRunFromPathWithOptions(allocator, resolved_path, .{
+    var attempt = bootstrap.attemptRunFromPathWithOptions(allocator, resolved.path, .{
         .trust_metadata_dir = cli.trust_dir,
         .trust_state_path = if (cli.trust_dir == null) null else cli.trust_state_path,
         .cache_root = cli.cache_root,
@@ -64,14 +66,38 @@ fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").Bootstr
     }
 }
 
-fn resolveBuildPathWithLockPolicy(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    if (hasLockSuffixIgnoreCase(path)) return path;
+const BuildPathResolution = struct {
+    path: []const u8,
+    using_lock: bool,
+    needs_free: bool,
+};
+
+fn resolveBuildPathWithLockPolicy(allocator: std.mem.Allocator, path: []const u8, allow_unlocked: bool) !BuildPathResolution {
+    if (hasLockSuffixIgnoreCase(path)) {
+        return .{
+            .path = path,
+            .using_lock = true,
+            .needs_free = false,
+        };
+    }
 
     const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{path});
     if (try pathExists(lock_path)) {
-        return lock_path;
+        return .{
+            .path = lock_path,
+            .using_lock = true,
+            .needs_free = true,
+        };
     }
+
     allocator.free(lock_path);
+    if (allow_unlocked) {
+        return .{
+            .path = path,
+            .using_lock = false,
+            .needs_free = false,
+        };
+    }
     return error.LockMissing;
 }
 
