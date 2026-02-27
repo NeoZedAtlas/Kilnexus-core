@@ -3,7 +3,7 @@ const parse_errors = @import("../../parser/parse_errors.zig");
 const abi_parser = @import("../../parser/abi_parser.zig");
 const validator = @import("../../knx/validator.zig");
 
-pub const planner_marker = "knx-freeze-v2";
+pub const planner_marker = "knx-freeze";
 
 pub fn canonicalizeWithSourceMetadata(
     allocator: std.mem.Allocator,

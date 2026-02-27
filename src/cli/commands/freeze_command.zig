@@ -5,7 +5,7 @@ const cli_types = @import("../types.zig");
 const parse_errors = @import("../../parser/parse_errors.zig");
 const abi_parser = @import("../../parser/abi_parser.zig");
 const validator = @import("../../knx/validator.zig");
-const v2_infer = @import("../runtime/v2_lock_infer.zig");
+const lock_infer = @import("../runtime/lock_infer.zig");
 const lock_metadata = @import("../runtime/lock_metadata.zig");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -42,12 +42,9 @@ fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").FreezeC
     const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source);
     defer allocator.free(parsed_intent.canonical_json);
     const intent_version = try parseVersion(parsed_intent.canonical_json);
+    if (intent_version != lock_infer.current_intent_version) return error.VersionUnsupported;
 
-    const lock_canonical = try switch (intent_version) {
-        1 => allocator.dupe(u8, parsed_intent.canonical_json),
-        2 => v2_infer.inferLockCanonicalJsonFromV2Canonical(allocator, parsed_intent.canonical_json),
-        else => error.VersionUnsupported,
-    };
+    const lock_canonical = try lock_infer.inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
     defer allocator.free(lock_canonical);
 
     const lock_with_source = try lock_metadata.canonicalizeWithSourceMetadata(allocator, lock_canonical, parsed_intent.canonical_json);

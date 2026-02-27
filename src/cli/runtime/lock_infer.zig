@@ -39,18 +39,20 @@ const FieldError = error{
     Internal,
 };
 
-pub fn inferLockCanonicalJsonFromV2Canonical(
+pub const current_intent_version: i64 = 1;
+
+pub fn inferLockCanonicalJsonFromIntentCanonical(
     allocator: std.mem.Allocator,
-    canonical_v2: []const u8,
+    canonical_intent: []const u8,
 ) parse_errors.ParseError![]u8 {
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, canonical_v2, .{}) catch |err| {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, canonical_intent, .{}) catch |err| {
         return parse_errors.normalizeName(@errorName(err));
     };
     defer parsed.deinit();
 
     const root = expectObject(parsed.value) catch |err| return mapFieldError(err);
     const version = expectIntegerField(root, "version") catch |err| return mapFieldError(err);
-    if (version != 2) return error.VersionUnsupported;
+    if (version != current_intent_version) return error.VersionUnsupported;
 
     const profile_text = expectStringField(root, "profile") catch |err| return mapFieldError(err);
     const profile = parseProfile(profile_text) catch |err| return mapFieldError(err);
@@ -158,7 +160,7 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
 
     // Expand sources through the existing workspace glob expander.
     const local_input: validator.LocalInputSpec = .{
-        .id = allocator.dupe(u8, "v2-src") catch return error.Internal,
+        .id = allocator.dupe(u8, "knx-src") catch return error.Internal,
         .include = include_patterns,
         .exclude = exclude_patterns,
     };
@@ -304,7 +306,7 @@ fn buildV1LockJson(allocator: std.mem.Allocator, input: BuildV1Input) ![]u8 {
     try std.json.Stringify.encodeJsonString(input.env_source_date_epoch, .{}, writer);
     try writer.writeAll("}");
 
-    try writer.writeAll(",\"inputs\":{\"local\":[{\"id\":\"v2-src\",\"include\":[");
+    try writer.writeAll(",\"inputs\":{\"local\":[{\"id\":\"knx-src\",\"include\":[");
     for (input.include_patterns, 0..) |pattern, i| {
         if (i != 0) try writer.writeAll(",");
         try std.json.Stringify.encodeJsonString(pattern, .{}, writer);
@@ -323,7 +325,7 @@ fn buildV1LockJson(allocator: std.mem.Allocator, input: BuildV1Input) ![]u8 {
     try writer.writeAll(",\"workspace\":{\"mounts\":[");
     for (input.expanded_files, 0..) |host_rel, i| {
         if (i != 0) try writer.writeAll(",");
-        const source_ref = try std.fmt.allocPrint(allocator, "v2-src/{s}", .{host_rel});
+        const source_ref = try std.fmt.allocPrint(allocator, "knx-src/{s}", .{host_rel});
         defer allocator.free(source_ref);
         const target_ref = try std.fmt.allocPrint(allocator, "src/{s}", .{host_rel});
         defer allocator.free(target_ref);
@@ -690,7 +692,7 @@ fn ensureOnlyKeys(object: std.json.ObjectMap, allowed: []const []const u8) Field
     }
 }
 
-test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.app" {
+test "inferLockCanonicalJsonFromIntentCanonical builds v1 lock for c.app" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -706,10 +708,10 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.app" {
     const main_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/main.c", .{tmp.sub_path[0..]});
     defer allocator.free(main_rel);
 
-    const source_v2 = try std.fmt.allocPrint(
+    const source_intent = try std.fmt.allocPrint(
         allocator,
         \\#!knxfile
-        \\version = 2
+        \\version = 1
         \\profile = "c.app"
         \\target = "x86_64-windows-gnu"
         \\
@@ -746,12 +748,12 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.app" {
     ,
         .{ include_pat, main_rel },
     );
-    defer allocator.free(source_v2);
+    defer allocator.free(source_intent);
 
-    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
-    defer allocator.free(parsed_v2.canonical_json);
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
 
-    const lock_json = try inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
     defer allocator.free(lock_json);
 
     _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
@@ -760,7 +762,7 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.app" {
     try std.testing.expectEqual(@as(usize, 3), build_spec.ops.len);
 }
 
-test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.lib" {
+test "inferLockCanonicalJsonFromIntentCanonical builds v1 lock for c.lib" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -772,10 +774,10 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.lib" {
     const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
     defer allocator.free(include_pat);
 
-    const source_v2 = try std.fmt.allocPrint(
+    const source_intent = try std.fmt.allocPrint(
         allocator,
         \\#!knxfile
-        \\version = 2
+        \\version = 1
         \\profile = "c.lib"
         \\target = "x86_64-windows-gnu"
         \\
@@ -811,11 +813,11 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.lib" {
     ,
         .{include_pat},
     );
-    defer allocator.free(source_v2);
+    defer allocator.free(source_intent);
 
-    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
-    defer allocator.free(parsed_v2.canonical_json);
-    const lock_json = try inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json);
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
     defer allocator.free(lock_json);
 
     _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
@@ -828,7 +830,7 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.lib" {
     }
 }
 
-test "inferLockCanonicalJsonFromV2Canonical supports multiple outputs via fs.copy fanout" {
+test "inferLockCanonicalJsonFromIntentCanonical supports multiple outputs via fs.copy fanout" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -841,10 +843,10 @@ test "inferLockCanonicalJsonFromV2Canonical supports multiple outputs via fs.cop
     const main_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/main.c", .{tmp.sub_path[0..]});
     defer allocator.free(main_rel);
 
-    const source_v2 = try std.fmt.allocPrint(
+    const source_intent = try std.fmt.allocPrint(
         allocator,
         \\#!knxfile
-        \\version = 2
+        \\version = 1
         \\profile = "c.app"
         \\target = "x86_64-windows-gnu"
         \\
@@ -885,11 +887,11 @@ test "inferLockCanonicalJsonFromV2Canonical supports multiple outputs via fs.cop
     ,
         .{ include_pat, main_rel },
     );
-    defer allocator.free(source_v2);
+    defer allocator.free(source_intent);
 
-    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
-    defer allocator.free(parsed_v2.canonical_json);
-    const lock_json = try inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json);
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
     defer allocator.free(lock_json);
 
     _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
@@ -905,7 +907,7 @@ test "inferLockCanonicalJsonFromV2Canonical supports multiple outputs via fs.cop
     }
 }
 
-test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.shared" {
+test "inferLockCanonicalJsonFromIntentCanonical builds v1 lock for c.shared" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -916,10 +918,10 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.shared" {
     const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
     defer allocator.free(include_pat);
 
-    const source_v2 = try std.fmt.allocPrint(
+    const source_intent = try std.fmt.allocPrint(
         allocator,
         \\#!knxfile
-        \\version = 2
+        \\version = 1
         \\profile = "c.shared"
         \\target = "x86_64-windows-gnu"
         \\
@@ -955,11 +957,11 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.shared" {
     ,
         .{include_pat},
     );
-    defer allocator.free(source_v2);
+    defer allocator.free(source_intent);
 
-    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
-    defer allocator.free(parsed_v2.canonical_json);
-    const lock_json = try inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json);
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
     defer allocator.free(lock_json);
 
     _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
@@ -978,7 +980,7 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.shared" {
     }
 }
 
-test "inferLockCanonicalJsonFromV2Canonical rejects profile-incompatible build fields" {
+test "inferLockCanonicalJsonFromIntentCanonical rejects profile-incompatible build fields" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -989,10 +991,10 @@ test "inferLockCanonicalJsonFromV2Canonical rejects profile-incompatible build f
     const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
     defer allocator.free(include_pat);
 
-    const source_v2 = try std.fmt.allocPrint(
+    const source_intent = try std.fmt.allocPrint(
         allocator,
         \\#!knxfile
-        \\version = 2
+        \\version = 1
         \\profile = "c.lib"
         \\target = "x86_64-windows-gnu"
         \\
@@ -1028,9 +1030,9 @@ test "inferLockCanonicalJsonFromV2Canonical rejects profile-incompatible build f
     ,
         .{include_pat},
     );
-    defer allocator.free(source_v2);
+    defer allocator.free(source_intent);
 
-    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
-    defer allocator.free(parsed_v2.canonical_json);
-    try std.testing.expectError(error.ValueInvalid, inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json));
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    try std.testing.expectError(error.ValueInvalid, inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json));
 }

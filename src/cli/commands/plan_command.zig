@@ -4,7 +4,7 @@ const cli_output = @import("../output.zig");
 const cli_summary = @import("../summary.zig");
 const cli_types = @import("../types.zig");
 const abi_parser = @import("../../parser/abi_parser.zig");
-const v2_infer = @import("../runtime/v2_lock_infer.zig");
+const lock_infer = @import("../runtime/lock_infer.zig");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const cli = cli_args.parseParseOnlyCliArgs(args) catch |err| {
@@ -45,24 +45,22 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.InvalidCommand;
     };
 
-    const lock_canonical = switch (intent_version) {
-        1 => try allocator.dupe(u8, parsed.canonical_json),
-        2 => v2_infer.inferLockCanonicalJsonFromV2Canonical(allocator, parsed.canonical_json) catch |err| {
-            if (cli.json_output) {
-                try cli_output.printSimpleFailureJson(allocator, "plan", @errorName(err));
-            } else {
-                cli_output.printSimpleFailureHuman("plan", @errorName(err));
-            }
-            return error.InvalidCommand;
-        },
-        else => {
-            if (cli.json_output) {
-                try cli_output.printSimpleFailureJson(allocator, "plan", "VersionUnsupported");
-            } else {
-                cli_output.printSimpleFailureHuman("plan", "VersionUnsupported");
-            }
-            return error.InvalidCommand;
-        },
+    if (intent_version != lock_infer.current_intent_version) {
+        if (cli.json_output) {
+            try cli_output.printSimpleFailureJson(allocator, "plan", "VersionUnsupported");
+        } else {
+            cli_output.printSimpleFailureHuman("plan", "VersionUnsupported");
+        }
+        return error.InvalidCommand;
+    }
+
+    const lock_canonical = lock_infer.inferLockCanonicalJsonFromIntentCanonical(allocator, parsed.canonical_json) catch |err| {
+        if (cli.json_output) {
+            try cli_output.printSimpleFailureJson(allocator, "plan", @errorName(err));
+        } else {
+            cli_output.printSimpleFailureHuman("plan", @errorName(err));
+        }
+        return error.InvalidCommand;
     };
     defer allocator.free(lock_canonical);
 
@@ -77,9 +75,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer summary.deinit(allocator);
 
     if (cli.json_output) {
-        try cli_output.printPlanJsonWithInfo(allocator, &summary, if (intent_version == 2) intent_version else null);
+        try cli_output.printPlanJson(allocator, &summary);
     } else {
-        cli_output.printPlanHumanWithInfo(&summary, if (intent_version == 2) intent_version else null);
+        cli_output.printPlanHuman(&summary);
     }
 }
 

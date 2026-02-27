@@ -3,7 +3,7 @@ const bootstrap = @import("../../bootstrap/state_machine.zig");
 const abi_parser = @import("../../parser/abi_parser.zig");
 const validator = @import("../../knx/validator.zig");
 const kx_error = @import("../../errors/kx_error.zig");
-const v2_infer = @import("../runtime/v2_lock_infer.zig");
+const lock_infer = @import("../runtime/lock_infer.zig");
 const lock_metadata = @import("../runtime/lock_metadata.zig");
 const cli_args = @import("../args.zig");
 const cli_output = @import("../output.zig");
@@ -153,11 +153,9 @@ fn computeExpectedLockCanonicalFromKnxPath(allocator: std.mem.Allocator, path: [
     const parsed = try abi_parser.parseLockfileStrict(allocator, source);
     defer allocator.free(parsed.canonical_json);
 
-    const base_lock = switch (try parseVersion(parsed.canonical_json)) {
-        1 => try allocator.dupe(u8, parsed.canonical_json),
-        2 => try v2_infer.inferLockCanonicalJsonFromV2Canonical(allocator, parsed.canonical_json),
-        else => return error.VersionUnsupported,
-    };
+    const intent_version = try parseVersion(parsed.canonical_json);
+    if (intent_version != lock_infer.current_intent_version) return error.VersionUnsupported;
+    const base_lock = try lock_infer.inferLockCanonicalJsonFromIntentCanonical(allocator, parsed.canonical_json);
     defer allocator.free(base_lock);
 
     return lock_metadata.canonicalizeWithSourceMetadata(allocator, base_lock, parsed.canonical_json);
@@ -169,11 +167,9 @@ fn computeExpectedLegacyLockCanonicalFromKnxPath(allocator: std.mem.Allocator, p
     const parsed = try abi_parser.parseLockfileStrict(allocator, source);
     defer allocator.free(parsed.canonical_json);
 
-    return switch (try parseVersion(parsed.canonical_json)) {
-        1 => allocator.dupe(u8, parsed.canonical_json),
-        2 => v2_infer.inferLockCanonicalJsonFromV2Canonical(allocator, parsed.canonical_json),
-        else => error.VersionUnsupported,
-    };
+    const intent_version = try parseVersion(parsed.canonical_json);
+    if (intent_version != lock_infer.current_intent_version) return error.VersionUnsupported;
+    return lock_infer.inferLockCanonicalJsonFromIntentCanonical(allocator, parsed.canonical_json);
 }
 
 fn loadCanonicalFromPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {

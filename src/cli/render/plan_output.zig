@@ -2,14 +2,7 @@ const std = @import("std");
 const types = @import("../types.zig");
 
 pub fn printPlanHuman(summary: *const types.KnxSummary) void {
-    printPlanHumanWithInfo(summary, null);
-}
-
-pub fn printPlanHumanWithInfo(summary: *const types.KnxSummary, inferred_from_version: ?i64) void {
     std.debug.print("Plan generated\n", .{});
-    if (inferred_from_version) |version| {
-        std.debug.print("Inferred from Knxfile version: {d}\n", .{version});
-    }
     std.debug.print("Verify mode: {s}\n", .{@tagName(summary.validation.verify_mode)});
     std.debug.print("Knx digest: {s}\n", .{summary.knx_digest_hex[0..]});
     std.debug.print("Operators ({d}):\n", .{summary.build_spec.ops.len});
@@ -38,10 +31,6 @@ pub fn printPlanHumanWithInfo(summary: *const types.KnxSummary, inferred_from_ve
 }
 
 pub fn printPlanJson(allocator: std.mem.Allocator, summary: *const types.KnxSummary) !void {
-    try printPlanJsonWithInfo(allocator, summary, null);
-}
-
-pub fn printPlanJsonWithInfo(allocator: std.mem.Allocator, summary: *const types.KnxSummary, inferred_from_version: ?i64) !void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var out_writer = out.writer(allocator);
@@ -51,12 +40,6 @@ pub fn printPlanJsonWithInfo(allocator: std.mem.Allocator, summary: *const types
 
     try writer.writeAll("{\"status\":\"ok\",\"command\":\"plan\",\"verify_mode\":");
     try std.json.Stringify.encodeJsonString(@tagName(summary.validation.verify_mode), .{}, writer);
-    try writer.writeAll(",\"inferred_from_version\":");
-    if (inferred_from_version) |version| {
-        try writer.print("{d}", .{version});
-    } else {
-        try writer.writeAll("null");
-    }
     try writer.writeAll(",\"knx_digest\":");
     try std.json.Stringify.encodeJsonString(summary.knx_digest_hex[0..], .{}, writer);
     try writer.writeAll(",\"operators\":[");
