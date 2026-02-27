@@ -6,6 +6,7 @@ const parse_errors = @import("../../parser/parse_errors.zig");
 const abi_parser = @import("../../parser/abi_parser.zig");
 const validator = @import("../../knx/validator.zig");
 const v2_infer = @import("../runtime/v2_lock_infer.zig");
+const lock_metadata = @import("../runtime/lock_metadata.zig");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const cli = cli_args.parseFreezeCliArgs(args) catch |err| {
@@ -45,14 +46,19 @@ fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").FreezeC
     };
     defer allocator.free(lock_canonical);
 
-    try validateLockCanonical(allocator, lock_canonical);
-    const knx_digest_hex = validator.computeKnxDigestHex(lock_canonical);
+    const lock_with_source = try lock_metadata.canonicalizeWithSourceMetadata(allocator, lock_canonical, parsed_intent.canonical_json);
+    defer allocator.free(lock_with_source);
 
-    try writeFileAtomic(allocator, lock_path, lock_canonical);
+    try validateLockCanonical(allocator, lock_with_source);
+    const knx_digest_hex = validator.computeKnxDigestHex(lock_with_source);
+
+    if (!cli.dry_run) {
+        try writeFileAtomic(allocator, lock_path, lock_with_source);
+    }
     if (cli.json_output) {
-        try printFreezeJson(allocator, cli.path, lock_path, knx_digest_hex[0..], lock_canonical.len);
+        try printFreezeJson(allocator, cli.path, lock_path, knx_digest_hex[0..], lock_with_source.len, cli.dry_run);
     } else {
-        printFreezeHuman(cli.path, lock_path, knx_digest_hex[0..], lock_canonical.len);
+        printFreezeHuman(cli.path, lock_path, knx_digest_hex[0..], lock_with_source.len, cli.dry_run);
     }
 }
 
@@ -106,15 +112,27 @@ fn writeFileAtomic(allocator: std.mem.Allocator, path: []const u8, content: []co
     try std.fs.cwd().rename(tmp_path, path);
 }
 
-fn printFreezeHuman(knx_path: []const u8, lock_path: []const u8, knx_digest: []const u8, bytes: usize) void {
-    std.debug.print("Freeze completed\n", .{});
+fn printFreezeHuman(knx_path: []const u8, lock_path: []const u8, knx_digest: []const u8, bytes: usize, dry_run: bool) void {
+    if (dry_run) {
+        std.debug.print("Freeze dry-run completed\n", .{});
+    } else {
+        std.debug.print("Freeze completed\n", .{});
+    }
     std.debug.print("Knxfile: {s}\n", .{knx_path});
     std.debug.print("Lockfile: {s}\n", .{lock_path});
+    std.debug.print("Dry run: {s}\n", .{if (dry_run) "true" else "false"});
     std.debug.print("Knx digest: {s}\n", .{knx_digest});
     std.debug.print("Canonical bytes: {d}\n", .{bytes});
 }
 
-fn printFreezeJson(allocator: std.mem.Allocator, knx_path: []const u8, lock_path: []const u8, knx_digest: []const u8, bytes: usize) !void {
+fn printFreezeJson(
+    allocator: std.mem.Allocator,
+    knx_path: []const u8,
+    lock_path: []const u8,
+    knx_digest: []const u8,
+    bytes: usize,
+    dry_run: bool,
+) !void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var out_writer = out.writer(allocator);
@@ -128,6 +146,8 @@ fn printFreezeJson(allocator: std.mem.Allocator, knx_path: []const u8, lock_path
     try std.json.Stringify.encodeJsonString(lock_path, .{}, writer);
     try writer.writeAll(",\"knx_digest\":");
     try std.json.Stringify.encodeJsonString(knx_digest, .{}, writer);
+    try writer.writeAll(",\"dry_run\":");
+    try writer.writeAll(if (dry_run) "true" else "false");
     try writer.writeAll(",\"canonical_json_bytes\":");
     try writer.print("{d}", .{bytes});
     try writer.writeAll("}\n");

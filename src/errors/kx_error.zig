@@ -29,6 +29,7 @@ pub const BuildError = error{
     NotImplemented,
     LockMissing,
     LockDrift,
+    AllowUnlockedForbidden,
     Internal,
 };
 

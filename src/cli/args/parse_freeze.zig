@@ -20,6 +20,10 @@ pub fn parseFreezeCliArgs(args: []const []const u8) !types.FreezeCliArgs {
                 output.json_output = true;
                 continue;
             }
+            if (std.mem.eql(u8, arg, "--dry-run")) {
+                output.dry_run = true;
+                continue;
+            }
             if (std.mem.eql(u8, arg, "--knxfile")) {
                 output.path = try common.nextOptionValue(args, &i);
                 path_set = true;
@@ -78,10 +82,17 @@ test "parseFreezeCliArgs parses positional and named forms" {
     try std.testing.expect(named.lock_path != null);
     try std.testing.expectEqualStrings("Knxfile.prod.lock", named.lock_path.?);
     try std.testing.expect(named.json_output);
+    try std.testing.expect(!named.dry_run);
 }
 
 test "parseFreezeCliArgs rejects invalid combinations" {
     try std.testing.expectError(error.InvalidCommand, parseFreezeCliArgs(&.{ "a", "b", "c" }));
     try std.testing.expectError(error.InvalidCommand, parseFreezeCliArgs(&.{"--lockfile"}));
     try std.testing.expectError(error.InvalidCommand, parseFreezeCliArgs(&.{ "--knxfile", "Knxfile.toml" }));
+}
+
+test "parseFreezeCliArgs supports dry-run" {
+    const parsed = try parseFreezeCliArgs(&.{"--dry-run"});
+    try std.testing.expect(parsed.dry_run);
+    try std.testing.expectEqualStrings("Knxfile", parsed.path);
 }

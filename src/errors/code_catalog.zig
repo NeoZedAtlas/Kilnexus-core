@@ -74,6 +74,7 @@ pub const entries: []const Entry = &.{
     .{ .name = "KX_BUILD_NOT_IMPLEMENTED", .value = 5007, .descriptor = .{ .family = .build, .summary = "build feature is not implemented in current MVP" } },
     .{ .name = "KX_BUILD_LOCK_MISSING", .value = 5008, .descriptor = .{ .family = .build, .summary = "lockfile missing; run knx freeze first" } },
     .{ .name = "KX_BUILD_LOCK_DRIFT", .value = 5009, .descriptor = .{ .family = .build, .summary = "knxfile changed since lock was generated; run knx freeze" } },
+    .{ .name = "KX_BUILD_ALLOW_UNLOCKED_FORBIDDEN", .value = 5010, .descriptor = .{ .family = .build, .summary = "--allow-unlocked is forbidden when CI is enabled" } },
 
     .{ .name = "KX_PUBLISH_ATOMIC", .value = 6001, .descriptor = .{ .family = .publish, .summary = "atomic publish failed" } },
     .{ .name = "KX_PUBLISH_OUTPUT_MISSING", .value = 6002, .descriptor = .{ .family = .publish, .summary = "declared output missing at publish boundary" } },

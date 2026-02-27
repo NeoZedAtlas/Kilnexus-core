@@ -11,29 +11,35 @@ pub fn loadKnxSummary(allocator: std.mem.Allocator, path: []const u8) !types.Knx
     defer allocator.free(source);
 
     const parsed = try abi_parser.parseLockfileStrict(allocator, source);
-    errdefer allocator.free(parsed.canonical_json);
+    defer allocator.free(parsed.canonical_json);
+    return loadKnxSummaryFromCanonicalJson(allocator, parsed.canonical_json);
+}
 
-    const validation = try validator.validateCanonicalJsonStrict(allocator, parsed.canonical_json);
+pub fn loadKnxSummaryFromCanonicalJson(allocator: std.mem.Allocator, canonical_json: []const u8) !types.KnxSummary {
+    const canonical_copy = try allocator.dupe(u8, canonical_json);
+    errdefer allocator.free(canonical_copy);
 
-    var toolchain_spec = try validator.parseToolchainSpecStrict(allocator, parsed.canonical_json);
+    const validation = try validator.validateCanonicalJsonStrict(allocator, canonical_copy);
+
+    var toolchain_spec = try validator.parseToolchainSpecStrict(allocator, canonical_copy);
     errdefer toolchain_spec.deinit(allocator);
 
-    var workspace_spec = try validator.parseWorkspaceSpecStrict(allocator, parsed.canonical_json);
+    var workspace_spec = try validator.parseWorkspaceSpecStrict(allocator, canonical_copy);
     errdefer workspace_spec.deinit(allocator);
 
-    var build_spec = try validator.parseBuildSpecStrict(allocator, parsed.canonical_json);
+    var build_spec = try validator.parseBuildSpecStrict(allocator, canonical_copy);
     errdefer build_spec.deinit(allocator);
 
     validator.validateBuildWriteIsolation(&workspace_spec, &build_spec) catch |err| {
         return parse_errors.normalizeName(@errorName(err));
     };
 
-    var output_spec = try validator.parseOutputSpecStrict(allocator, parsed.canonical_json);
+    var output_spec = try validator.parseOutputSpecStrict(allocator, canonical_copy);
     errdefer output_spec.deinit(allocator);
 
-    const knx_digest_hex = validator.computeKnxDigestHex(parsed.canonical_json);
+    const knx_digest_hex = validator.computeKnxDigestHex(canonical_copy);
     return .{
-        .canonical_json = parsed.canonical_json,
+        .canonical_json = canonical_copy,
         .validation = validation,
         .toolchain_spec = toolchain_spec,
         .workspace_spec = workspace_spec,

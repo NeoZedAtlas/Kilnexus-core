@@ -13,6 +13,8 @@ pub const printValidateJson = validate_output.printValidateJson;
 
 pub const printPlanHuman = plan_output.printPlanHuman;
 pub const printPlanJson = plan_output.printPlanJson;
+pub const printPlanHumanWithInfo = plan_output.printPlanHumanWithInfo;
+pub const printPlanJsonWithInfo = plan_output.printPlanJsonWithInfo;
 
 pub const printSuccessHuman = build_output.printSuccessHuman;
 pub const printFailureHuman = build_output.printFailureHuman;

@@ -36,6 +36,7 @@ pub const ParseOnlyCliArgs = struct {
 pub const FreezeCliArgs = struct {
     path: []const u8 = "Knxfile",
     lock_path: ?[]const u8 = null,
+    dry_run: bool = false,
     json_output: bool = false,
 };
 

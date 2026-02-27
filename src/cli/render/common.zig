@@ -14,7 +14,7 @@ pub fn printUsage() void {
         "build options: --knxfile <path> --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --allow-unlocked --json --help (defaults to <Knxfile>.lock)\n",
         .{},
     );
-    std.debug.print("freeze options: [Knxfile] [Knxfile.lock] --knxfile <path> --lockfile <path> --json --help\n", .{});
+    std.debug.print("freeze options: [Knxfile] [Knxfile.lock] --knxfile <path> --lockfile <path> --dry-run --json --help\n", .{});
     std.debug.print("validate options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("plan options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("graph options: [Knxfile] --knxfile <path> --json --help\n", .{});
