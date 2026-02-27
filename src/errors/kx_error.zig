@@ -5,67 +5,7 @@ const error_names = @import("error_names.zig");
 const code_catalog = @import("code_catalog.zig");
 
 pub const Family = code_catalog.Family;
-
-pub const Code = enum(u32) {
-    KX_OK = 0,
-
-    KX_PARSE_SYNTAX = 1001,
-    KX_PARSE_SCHEMA = 1002,
-    KX_PARSE_CANONICAL = 1003,
-    KX_PARSE_EMPTY_INPUT = 1004,
-    KX_PARSE_MISSING_FIELD = 1005,
-    KX_PARSE_TYPE_MISMATCH = 1006,
-    KX_PARSE_VALUE_INVALID = 1007,
-    KX_PARSE_VERSION_UNSUPPORTED = 1008,
-    KX_PARSE_OPERATOR_DISALLOWED = 1009,
-    KX_PARSE_OUTPUT_INVALID = 1010,
-    KX_PARSE_LEGACY_BUILD_BLOCK = 1011,
-
-    KX_TRUST_METADATA_MISSING = 2001,
-    KX_TRUST_METADATA_MALFORMED = 2002,
-    KX_TRUST_ROLE_POLICY = 2003,
-    KX_TRUST_KEY_UNSUPPORTED = 2004,
-    KX_TRUST_SIGNATURE_INVALID = 2005,
-    KX_TRUST_SIGNATURE_THRESHOLD = 2006,
-    KX_TRUST_METADATA_EXPIRED = 2007,
-    KX_TRUST_ROLLBACK = 2008,
-    KX_TRUST_VERSION_LINK = 2009,
-    KX_TRUST_VERSION_INVALID = 2010,
-    KX_TRUST_STATE_IO = 2011,
-    KX_TRUST_STATE_INVALID = 2012,
-
-    KX_IO_NOT_FOUND = 3001,
-    KX_IO_ACCESS_DENIED = 3002,
-    KX_IO_PATH_INVALID = 3003,
-    KX_IO_READ_FAILED = 3004,
-    KX_IO_WRITE_FAILED = 3005,
-    KX_IO_NO_SPACE = 3006,
-    KX_IO_RENAME_FAILED = 3007,
-    KX_IO_ALREADY_EXISTS = 3008,
-
-    KX_INTEGRITY_BLOB_MISMATCH = 4001,
-    KX_INTEGRITY_TREE_MISMATCH = 4002,
-    KX_INTEGRITY_SIZE_MISMATCH = 4003,
-    KX_INTEGRITY_HASH_UNSUPPORTED = 4004,
-    KX_INTEGRITY_PATH_TRAVERSAL = 4005,
-    KX_INTEGRITY_SYMLINK_POLICY = 4006,
-
-    KX_BUILD_OPERATOR_FAILED = 5001,
-    KX_BUILD_OPERATOR_DISALLOWED = 5002,
-    KX_BUILD_TOOLCHAIN_MISSING = 5003,
-    KX_BUILD_SANDBOX_VIOLATION = 5004,
-    KX_BUILD_GRAPH_INVALID = 5005,
-    KX_BUILD_TIMEOUT = 5006,
-    KX_BUILD_NOT_IMPLEMENTED = 5007,
-
-    KX_PUBLISH_ATOMIC = 6001,
-    KX_PUBLISH_OUTPUT_MISSING = 6002,
-    KX_PUBLISH_OUTPUT_HASH_MISMATCH = 6003,
-    KX_PUBLISH_FSYNC_FAILED = 6004,
-    KX_PUBLISH_PERMISSION = 6005,
-
-    KX_INTERNAL = 9000,
-};
+pub const Code = code_catalog.Code;
 
 pub const Descriptor = code_catalog.Descriptor;
 
@@ -109,7 +49,7 @@ pub const IoError = error{
 };
 
 pub fn describe(code: Code) Descriptor {
-    return code_catalog.describeByCodeValue(@intFromEnum(code));
+    return code_catalog.describe(code);
 }
 
 pub fn buildErrorId(
@@ -250,21 +190,8 @@ fn isIgnored(comptime name: []const u8, comptime ignored: []const []const u8) bo
     return false;
 }
 
-fn assertCatalogCoverage() void {
-    inline for (@typeInfo(Code).@"enum".fields) |field| {
-        const code_value: u32 = @intCast(field.value);
-        if (!code_catalog.hasCodeValue(code_value)) {
-            @compileError(std.fmt.comptimePrint(
-                "No descriptor catalog entry for Code.{s} ({d})",
-                .{ field.name, code_value },
-            ));
-        }
-    }
-}
-
 comptime {
     @setEvalBranchQuota(50_000);
-    assertCatalogCoverage();
     assertConventionCoverage(mini_tuf.TrustError, trust_convention, &.{"Internal"});
     assertConventionCoverage(parse_errors.ParseError, parse_convention, &.{"Internal"});
     assertConventionCoverage(IoError, io_convention, &.{"Internal"});
