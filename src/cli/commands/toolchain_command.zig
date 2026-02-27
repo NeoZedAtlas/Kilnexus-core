@@ -1,5 +1,7 @@
 const std = @import("std");
 const cli_args = @import("../args.zig");
+const cli_output = @import("../output.zig");
+const cli_types = @import("../types.zig");
 const inspector = @import("../runtime/cache_inspector.zig");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
@@ -12,6 +14,17 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.InvalidCommand;
     };
 
+    runWithCli(allocator, cli) catch |err| {
+        if (cli.json_output) {
+            try cli_output.printSimpleFailureJson(allocator, "toolchain", @errorName(err));
+        } else {
+            cli_output.printSimpleFailureHuman("toolchain", @errorName(err));
+        }
+        return err;
+    };
+}
+
+fn runWithCli(allocator: std.mem.Allocator, cli: cli_types.ToolchainCliArgs) !void {
     const toolchains = try inspector.listOfficialToolchains(allocator, cli.cache_root);
     defer {
         for (toolchains) |*entry| entry.deinit(allocator);

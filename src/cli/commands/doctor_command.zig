@@ -1,5 +1,7 @@
 const std = @import("std");
 const cli_args = @import("../args.zig");
+const cli_output = @import("../output.zig");
+const cli_types = @import("../types.zig");
 const abi_parser = @import("../../parser/abi_parser.zig");
 
 const CheckStatus = enum {
@@ -24,6 +26,17 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.InvalidCommand;
     };
 
+    runWithCli(allocator, cli) catch |err| {
+        if (cli.json_output) {
+            try cli_output.printSimpleFailureJson(allocator, "doctor", @errorName(err));
+        } else {
+            cli_output.printSimpleFailureHuman("doctor", @errorName(err));
+        }
+        return err;
+    };
+}
+
+fn runWithCli(allocator: std.mem.Allocator, cli: cli_types.DoctorCliArgs) !void {
     var checks: [5]CheckResult = undefined;
     checks[0] = checkParserAbi(allocator);
     checks[1] = try checkWritableDirectory(allocator, "cache_root", cli.cache_root);
