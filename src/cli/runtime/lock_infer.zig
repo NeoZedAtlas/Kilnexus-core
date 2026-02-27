@@ -169,11 +169,43 @@ pub fn inferLockCanonicalJsonFromIntentCanonical(
     if (outputs_array.items.len == 0) return error.OutputInvalid;
     var outputs: std.ArrayList(OutputIntent) = .empty;
     defer outputs.deinit(allocator);
+    var owned_output_strings: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned_output_strings.items) |item| allocator.free(item);
+        owned_output_strings.deinit(allocator);
+    }
     for (outputs_array.items) |item| {
         const obj = expectObject(item) catch |err| return mapFieldError(err);
-        const source = expectStringField(obj, "source") catch |err| return mapFieldError(err);
-        const publish_as = expectStringField(obj, "publish_as") catch |err| return mapFieldError(err);
-        const mode = expectStringField(obj, "mode") catch |err| return mapFieldError(err);
+        ensureOnlyKeys(obj, &.{ "source", "publish_as", "mode" }) catch |err| return mapFieldError(err);
+
+        const source_opt = optionalStringField(obj, "source") catch |err| return mapFieldError(err);
+        const publish_as_opt = optionalStringField(obj, "publish_as") catch |err| return mapFieldError(err);
+        var source: []const u8 = undefined;
+        var publish_as: []const u8 = undefined;
+        if (source_opt == null and publish_as_opt == null) return error.OutputInvalid;
+
+        if (source_opt) |text| {
+            source = text;
+        } else {
+            const publish = publish_as_opt.?;
+            const generated = std.fmt.allocPrint(allocator, "bin/{s}", .{publish}) catch return error.Internal;
+            owned_output_strings.append(allocator, generated) catch return error.Internal;
+            source = generated;
+        }
+
+        if (publish_as_opt) |text| {
+            publish_as = text;
+        } else {
+            const base = std.fs.path.basename(source);
+            if (base.len == 0) return error.OutputInvalid;
+            publish_as = base;
+        }
+
+        const mode = if (obj.get("mode")) |value| blk: {
+            const text = expectString(value) catch |err| return mapFieldError(err);
+            break :blk text;
+        } else defaultOutputMode(profile);
+
         if (!isValidWorkspacePath(source)) return error.OutputInvalid;
         if (!isValidPublishName(publish_as)) return error.OutputInvalid;
         if (!isValidMode(mode)) return error.OutputInvalid;
@@ -703,6 +735,13 @@ fn expectArray(value: std.json.Value) FieldError!std.json.Array {
     };
 }
 
+fn optionalStringField(object: std.json.ObjectMap, key: []const u8) FieldError!?[]const u8 {
+    const value = object.get(key) orelse return null;
+    const text = try expectString(value);
+    if (text.len == 0) return error.ValueInvalid;
+    return text;
+}
+
 fn expectString(value: std.json.Value) FieldError![]const u8 {
     return switch (value) {
         .string => |text| text,
@@ -779,6 +818,13 @@ fn isAllowedLinkArg(arg: []const u8) bool {
         return isValidPublishName(soname);
     }
     return false;
+}
+
+fn defaultOutputMode(profile: Profile) []const u8 {
+    return switch (profile) {
+        .c_app, .c_shared => "0755",
+        .c_lib => "0644",
+    };
 }
 
 fn validatorHelperIsAllowedCompileArg(arg: []const u8) bool {
@@ -1373,6 +1419,144 @@ test "inferLockCanonicalJsonFromIntentCanonical supports c.lib without build blo
         .archive_pack => |pack| try std.testing.expect(pack.format == .tar),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "inferLockCanonicalJsonFromIntentCanonical infers output source and mode from publish_as" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/main.c", .data = "int main(void){return 0;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_intent = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 1
+        \\profile = "c.app"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[[outputs]]
+        \\publish_as = "demo.exe"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_intent);
+
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
+    defer allocator.free(lock_json);
+
+    _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
+    var output_spec = try validator.parseOutputSpecStrict(allocator, lock_json);
+    defer output_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), output_spec.entries.len);
+    try std.testing.expectEqualStrings("bin/demo.exe", output_spec.entries[0].source_path.?);
+    try std.testing.expectEqualStrings("demo.exe", output_spec.entries[0].publish_as.?);
+    try std.testing.expectEqual(@as(u32, 0o755), output_spec.entries[0].mode);
+}
+
+test "inferLockCanonicalJsonFromIntentCanonical infers publish_as and mode from source for c.lib" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/liba.c", .data = "int a(void){return 1;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_intent = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 1
+        \\profile = "c.lib"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[[outputs]]
+        \\source = "bin/pkg/libbundle.tar.gz"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_intent);
+
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
+    defer allocator.free(lock_json);
+
+    _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
+    var output_spec = try validator.parseOutputSpecStrict(allocator, lock_json);
+    defer output_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), output_spec.entries.len);
+    try std.testing.expectEqualStrings("bin/pkg/libbundle.tar.gz", output_spec.entries[0].source_path.?);
+    try std.testing.expectEqualStrings("libbundle.tar.gz", output_spec.entries[0].publish_as.?);
+    try std.testing.expectEqual(@as(u32, 0o644), output_spec.entries[0].mode);
+}
+
+test "inferLockCanonicalJsonFromIntentCanonical rejects output entry when source and publish_as are both missing" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/main.c", .data = "int main(void){return 0;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_intent = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 1
+        \\profile = "c.app"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[[outputs]]
+        \\mode = "0755"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_intent);
+
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    try std.testing.expectError(error.OutputInvalid, inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json));
 }
 
 test "inferLockCanonicalJsonFromIntentCanonical rejects profile-incompatible build fields" {
