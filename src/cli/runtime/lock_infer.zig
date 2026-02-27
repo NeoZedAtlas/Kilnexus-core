@@ -40,6 +40,14 @@ const FieldError = error{
 };
 
 pub const current_intent_version: i64 = 1;
+const default_policy_network = "off";
+const default_policy_verify_mode = "strict";
+const default_policy_clock = "fixed";
+const default_env_tz = "UTC";
+const default_env_lang = "C";
+const default_env_source_date_epoch = "1735689600";
+const default_c_std = "c11";
+const default_opt = "O2";
 
 pub fn inferLockCanonicalJsonFromIntentCanonical(
     allocator: std.mem.Allocator,
@@ -59,10 +67,10 @@ pub fn inferLockCanonicalJsonFromIntentCanonical(
 
     const target = expectStringField(root, "target") catch |err| return mapFieldError(err);
     const toolchain = expectObjectField(root, "toolchain") catch |err| return mapFieldError(err);
-    const policy = expectObjectField(root, "policy") catch |err| return mapFieldError(err);
-    const env = expectObjectField(root, "env") catch |err| return mapFieldError(err);
+    const policy = expectOptionalObjectField(root, "policy") catch |err| return mapFieldError(err);
+    const env = expectOptionalObjectField(root, "env") catch |err| return mapFieldError(err);
     const sources = expectObjectField(root, "sources") catch |err| return mapFieldError(err);
-    const build = expectObjectField(root, "build") catch |err| return mapFieldError(err);
+    const build = expectOptionalObjectField(root, "build") catch |err| return mapFieldError(err);
 
     const toolchain_id = expectStringField(toolchain, "id") catch |err| return mapFieldError(err);
     const toolchain_source = expectStringField(toolchain, "source") catch |err| return mapFieldError(err);
@@ -71,12 +79,25 @@ pub fn inferLockCanonicalJsonFromIntentCanonical(
     const toolchain_size = expectIntegerField(toolchain, "size") catch |err| return mapFieldError(err);
     if (toolchain_size <= 0) return error.ValueInvalid;
 
-    const policy_network = expectStringField(policy, "network") catch |err| return mapFieldError(err);
-    const policy_verify_mode = expectStringField(policy, "verify_mode") catch |err| return mapFieldError(err);
-    const policy_clock = expectStringField(policy, "clock") catch |err| return mapFieldError(err);
-    const env_tz = expectStringField(env, "TZ") catch |err| return mapFieldError(err);
-    const env_lang = expectStringField(env, "LANG") catch |err| return mapFieldError(err);
-    const env_source_date_epoch = expectStringField(env, "SOURCE_DATE_EPOCH") catch |err| return mapFieldError(err);
+    if (policy) |obj| {
+        ensureOnlyKeys(obj, &.{ "network", "verify_mode", "clock" }) catch |err| return mapFieldError(err);
+    }
+    if (env) |obj| {
+        ensureOnlyKeys(obj, &.{ "TZ", "LANG", "SOURCE_DATE_EPOCH" }) catch |err| return mapFieldError(err);
+    }
+
+    const policy_network = expectOptionalStringField(policy, "network", default_policy_network) catch |err| return mapFieldError(err);
+    if (!std.mem.eql(u8, policy_network, "off")) return error.ValueInvalid;
+    const policy_verify_mode = expectOptionalStringField(policy, "verify_mode", default_policy_verify_mode) catch |err| return mapFieldError(err);
+    if (!std.mem.eql(u8, policy_verify_mode, "strict") and !std.mem.eql(u8, policy_verify_mode, "fast")) return error.ValueInvalid;
+    const policy_clock = expectOptionalStringField(policy, "clock", default_policy_clock) catch |err| return mapFieldError(err);
+    if (!std.mem.eql(u8, policy_clock, "fixed")) return error.ValueInvalid;
+    const env_tz = expectOptionalStringField(env, "TZ", default_env_tz) catch |err| return mapFieldError(err);
+    if (!std.mem.eql(u8, env_tz, "UTC")) return error.ValueInvalid;
+    const env_lang = expectOptionalStringField(env, "LANG", default_env_lang) catch |err| return mapFieldError(err);
+    if (!std.mem.eql(u8, env_lang, "C")) return error.ValueInvalid;
+    const env_source_date_epoch = expectOptionalStringField(env, "SOURCE_DATE_EPOCH", default_env_source_date_epoch) catch |err| return mapFieldError(err);
+    if (!isAsciiDigits(env_source_date_epoch)) return error.ValueInvalid;
 
     const include_patterns = parseStringArrayDup(allocator, sources, "include") catch |err| return mapFieldError(err);
     defer freeOwnedStrings(allocator, include_patterns);
@@ -85,40 +106,41 @@ pub fn inferLockCanonicalJsonFromIntentCanonical(
 
     const exclude_patterns = parseOptionalStringArrayDup(allocator, sources, "exclude") catch |err| return mapFieldError(err);
     defer freeOwnedStrings(allocator, exclude_patterns);
-    validateBuildFieldSet(profile, build) catch |err| return mapFieldError(err);
+    if (build) |obj| {
+        validateBuildFieldSet(profile, obj) catch |err| return mapFieldError(err);
+    }
 
-    const entry_host_path = switch (profile) {
-        .c_app => blk: {
-            const path = expectStringField(build, "entry") catch |err| return mapFieldError(err);
-            if (!std.mem.endsWith(u8, path, ".c")) return error.ValueInvalid;
-            if (!isValidWorkspacePath(path)) return error.ValueInvalid;
-            break :blk path;
-        },
-        .c_lib, .c_shared => null,
-    };
+    const c_std = if (build) |obj| blk: {
+        if (obj.get("c_std")) |value| {
+            const text = expectString(value) catch |err| return mapFieldError(err);
+            if (!isAllowedCStd(text)) return error.ValueInvalid;
+            break :blk text;
+        }
+        break :blk default_c_std;
+    } else default_c_std;
 
-    const c_std = if (build.get("c_std")) |value| blk: {
-        const text = expectString(value) catch |err| return mapFieldError(err);
-        if (!isAllowedCStd(text)) return error.ValueInvalid;
-        break :blk text;
-    } else "c11";
+    const opt = if (build) |obj| blk: {
+        if (obj.get("opt")) |value| {
+            const text = expectString(value) catch |err| return mapFieldError(err);
+            if (!isAllowedOpt(text)) return error.ValueInvalid;
+            break :blk text;
+        }
+        break :blk default_opt;
+    } else default_opt;
 
-    const opt = if (build.get("opt")) |value| blk: {
-        const text = expectString(value) catch |err| return mapFieldError(err);
-        if (!isAllowedOpt(text)) return error.ValueInvalid;
-        break :blk text;
-    } else "O2";
-
-    var defines = parseOptionalStringArrayBorrow(allocator, build, "defines") catch |err| return mapFieldError(err);
+    var defines = parseOptionalStringArrayBorrowFromOptionalObject(allocator, build, "defines") catch |err| return mapFieldError(err);
     defer defines.deinit(allocator);
-    var include_dirs = parseOptionalStringArrayBorrow(allocator, build, "include_dirs") catch |err| return mapFieldError(err);
+    var include_dirs = parseOptionalStringArrayBorrowFromOptionalObject(allocator, build, "include_dirs") catch |err| return mapFieldError(err);
     defer include_dirs.deinit(allocator);
-    var link_flags = parseOptionalStringArrayBorrow(allocator, build, "link") catch |err| return mapFieldError(err);
+    var link_flags = parseOptionalStringArrayBorrowFromOptionalObject(allocator, build, "link") catch |err| return mapFieldError(err);
     defer link_flags.deinit(allocator);
-    const archive_format = if (build.get("archive_format")) |value| blk: {
-        const text = expectString(value) catch |err| return mapFieldError(err);
-        if (!std.mem.eql(u8, text, "tar") and !std.mem.eql(u8, text, "tar.gz")) return error.ValueInvalid;
-        break :blk text;
+    const archive_format = if (build) |obj| blk: {
+        if (obj.get("archive_format")) |value| {
+            const text = expectString(value) catch |err| return mapFieldError(err);
+            if (!std.mem.eql(u8, text, "tar") and !std.mem.eql(u8, text, "tar.gz")) return error.ValueInvalid;
+            break :blk text;
+        }
+        break :blk "tar";
     } else "tar";
 
     switch (profile) {
@@ -170,6 +192,19 @@ pub fn inferLockCanonicalJsonFromIntentCanonical(
     };
     defer freeOwnedStrings(allocator, expanded_files);
     if (expanded_files.len == 0) return error.ValueInvalid;
+
+    if (include_dirs.items.len == 0) {
+        var inferred_include_dirs = inferIncludeDirs(allocator, include_patterns, expanded_files) catch |err| return mapFieldError(err);
+        defer inferred_include_dirs.deinit(allocator);
+        for (inferred_include_dirs.items) |path| {
+            include_dirs.append(allocator, path) catch return error.Internal;
+        }
+    }
+
+    const entry_host_path = switch (profile) {
+        .c_app => resolveCAppEntryPath(build, expanded_files) catch |err| return mapFieldError(err),
+        .c_lib, .c_shared => null,
+    };
 
     var compile_units: std.ArrayList(CompileUnit) = .empty;
     defer {
@@ -505,6 +540,90 @@ fn parseOptionalStringArrayBorrow(allocator: std.mem.Allocator, object: std.json
     return out;
 }
 
+fn parseOptionalStringArrayBorrowFromOptionalObject(
+    allocator: std.mem.Allocator,
+    object: ?std.json.ObjectMap,
+    key: []const u8,
+) FieldError!std.ArrayList([]const u8) {
+    if (object) |obj| return parseOptionalStringArrayBorrow(allocator, obj, key);
+    return .empty;
+}
+
+fn inferIncludeDirs(
+    allocator: std.mem.Allocator,
+    include_patterns: [][]u8,
+    expanded_files: [][]u8,
+) FieldError!std.ArrayList([]const u8) {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (include_patterns) |pattern| {
+        const root = extractStaticSourceRoot(pattern) orelse continue;
+        if (!anyPathHasPrefix(expanded_files, root)) continue;
+        if (!containsString(out.items, root)) {
+            out.append(allocator, root) catch return error.Internal;
+        }
+    }
+
+    // Fallback for wildcard-only patterns (e.g. "*.c"): include all discovered source directories.
+    if (out.items.len == 0) {
+        for (expanded_files) |path| {
+            const dir = std.fs.path.dirname(path) orelse continue;
+            if (!isValidWorkspacePath(dir)) continue;
+            if (containsString(out.items, dir)) continue;
+            out.append(allocator, dir) catch return error.Internal;
+        }
+    }
+
+    return out;
+}
+
+fn extractStaticSourceRoot(pattern: []const u8) ?[]const u8 {
+    var wildcard_index: ?usize = null;
+    for (pattern, 0..) |ch, idx| {
+        switch (ch) {
+            '*', '?', '[', ']', '{', '}' => {
+                wildcard_index = idx;
+                break;
+            },
+            else => {},
+        }
+    }
+
+    var prefix = if (wildcard_index) |idx| pattern[0..idx] else pattern;
+    while (prefix.len > 0 and prefix[prefix.len - 1] == '/') {
+        prefix = prefix[0 .. prefix.len - 1];
+    }
+    if (prefix.len == 0) return null;
+
+    if (wildcard_index == null and std.fs.path.extension(prefix).len != 0) {
+        prefix = std.fs.path.dirname(prefix) orelse return null;
+        if (prefix.len == 0) return null;
+    }
+
+    if (!isValidWorkspacePath(prefix)) return null;
+    return prefix;
+}
+
+fn anyPathHasPrefix(paths: [][]u8, prefix: []const u8) bool {
+    for (paths) |path| {
+        if (hasPathPrefix(path, prefix)) return true;
+    }
+    return false;
+}
+
+fn hasPathPrefix(path: []const u8, prefix: []const u8) bool {
+    if (std.mem.eql(u8, path, prefix)) return true;
+    return path.len > prefix.len and std.mem.startsWith(u8, path, prefix) and path[prefix.len] == '/';
+}
+
+fn containsString(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |item| {
+        if (std.mem.eql(u8, item, needle)) return true;
+    }
+    return false;
+}
+
 fn objectNameFromPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(path, &digest, .{});
@@ -517,9 +636,52 @@ fn freeOwnedStrings(allocator: std.mem.Allocator, items: [][]u8) void {
     allocator.free(items);
 }
 
+fn resolveCAppEntryPath(build: ?std.json.ObjectMap, expanded_files: [][]u8) FieldError!?[]const u8 {
+    var explicit_entry: ?[]const u8 = null;
+    if (build) |obj| {
+        if (obj.get("entry")) |entry_value| {
+            const path = expectString(entry_value) catch return error.TypeMismatch;
+            if (!std.mem.endsWith(u8, path, ".c")) return error.ValueInvalid;
+            if (!isValidWorkspacePath(path)) return error.ValueInvalid;
+            explicit_entry = path;
+        }
+    }
+
+    if (explicit_entry) |entry| {
+        for (expanded_files) |path| {
+            if (std.mem.eql(u8, path, entry)) return entry;
+        }
+        return error.ValueInvalid;
+    }
+
+    var c_source_count: usize = 0;
+    var only_c_source: ?[]const u8 = null;
+    var main_count: usize = 0;
+    var main_candidate: ?[]const u8 = null;
+    for (expanded_files) |path| {
+        if (!std.mem.endsWith(u8, path, ".c")) continue;
+        c_source_count += 1;
+        only_c_source = path;
+        if (std.mem.eql(u8, path, "main.c") or std.mem.endsWith(u8, path, "/main.c")) {
+            main_count += 1;
+            main_candidate = path;
+        }
+    }
+
+    if (main_count == 1) return main_candidate.?;
+    if (main_count > 1) return error.ValueInvalid;
+    if (c_source_count == 1) return only_c_source.?;
+    return error.ValueInvalid;
+}
+
 fn expectObjectField(object: std.json.ObjectMap, key: []const u8) FieldError!std.json.ObjectMap {
     const value = object.get(key) orelse return error.MissingField;
     return expectObject(value);
+}
+
+fn expectOptionalObjectField(object: std.json.ObjectMap, key: []const u8) FieldError!?std.json.ObjectMap {
+    const value = object.get(key) orelse return null;
+    return try expectObject(value);
 }
 
 fn expectArrayField(object: std.json.ObjectMap, key: []const u8) FieldError!std.json.Array {
@@ -555,12 +717,34 @@ fn expectStringField(object: std.json.ObjectMap, key: []const u8) FieldError![]c
     return text;
 }
 
+fn expectOptionalStringField(
+    object: ?std.json.ObjectMap,
+    key: []const u8,
+    default_value: []const u8,
+) FieldError![]const u8 {
+    if (object) |obj| {
+        const value = obj.get(key) orelse return default_value;
+        const text = try expectString(value);
+        if (text.len == 0) return error.ValueInvalid;
+        return text;
+    }
+    return default_value;
+}
+
 fn expectIntegerField(object: std.json.ObjectMap, key: []const u8) FieldError!i64 {
     const value = object.get(key) orelse return error.MissingField;
     return switch (value) {
         .integer => |num| num,
         else => error.TypeMismatch,
     };
+}
+
+fn isAsciiDigits(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |ch| {
+        if (ch < '0' or ch > '9') return false;
+    }
+    return true;
 }
 
 fn isAllowedCStd(value: []const u8) bool {
@@ -976,6 +1160,217 @@ test "inferLockCanonicalJsonFromIntentCanonical builds v1 lock for c.shared" {
             }
             try std.testing.expect(found_shared);
         },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "inferLockCanonicalJsonFromIntentCanonical applies defaults for minimal c.app intent" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.makePath("proj/include");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/main.c", .data = "int main(void){return 0;}\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "proj/include/app.h", .data = "#pragma once\n" });
+
+    const src_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(src_pat);
+    const inc_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/include/*.h", .{tmp.sub_path[0..]});
+    defer allocator.free(inc_pat);
+    const include_root = try std.fmt.allocPrint(allocator, "-Isrc/.zig-cache/tmp/{s}/proj/include", .{tmp.sub_path[0..]});
+    defer allocator.free(include_root);
+
+    const source_intent = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 1
+        \\profile = "c.app"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[sources]
+        \\include = ["{s}", "{s}"]
+        \\
+        \\[[outputs]]
+        \\source = "bin/app.exe"
+        \\publish_as = "app.exe"
+        \\mode = "0755"
+    ,
+        .{ src_pat, inc_pat },
+    );
+    defer allocator.free(source_intent);
+
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
+    defer allocator.free(lock_json);
+
+    _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
+    var build_spec = try validator.parseBuildSpecStrict(allocator, lock_json);
+    defer build_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), build_spec.ops.len);
+    switch (build_spec.ops[0]) {
+        .c_compile => |compile| {
+            var has_o2 = false;
+            var has_c11 = false;
+            var has_inferred_include = false;
+            for (compile.args) |arg| {
+                if (std.mem.eql(u8, arg, "-O2")) has_o2 = true;
+                if (std.mem.eql(u8, arg, "-std=c11")) has_c11 = true;
+                if (std.mem.eql(u8, arg, include_root)) has_inferred_include = true;
+            }
+            try std.testing.expect(has_o2);
+            try std.testing.expect(has_c11);
+            try std.testing.expect(has_inferred_include);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "inferLockCanonicalJsonFromIntentCanonical rejects ambiguous c.app main entry inference" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/a");
+    try tmp.dir.makePath("proj/b");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/a/main.c", .data = "int main(void){return 0;}\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "proj/b/main.c", .data = "int main(void){return 0;}\n" });
+
+    const pat_a = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/a/main.c", .{tmp.sub_path[0..]});
+    defer allocator.free(pat_a);
+    const pat_b = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/b/main.c", .{tmp.sub_path[0..]});
+    defer allocator.free(pat_b);
+
+    const source_intent = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 1
+        \\profile = "c.app"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[sources]
+        \\include = ["{s}", "{s}"]
+        \\
+        \\[[outputs]]
+        \\source = "bin/app.exe"
+        \\publish_as = "app.exe"
+        \\mode = "0755"
+    ,
+        .{ pat_a, pat_b },
+    );
+    defer allocator.free(source_intent);
+
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    try std.testing.expectError(error.ValueInvalid, inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json));
+}
+
+test "inferLockCanonicalJsonFromIntentCanonical rejects c.app when no unique entry can be inferred" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/a.c", .data = "int a(void){return 1;}\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/b.c", .data = "int b(void){return 2;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_intent = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 1
+        \\profile = "c.app"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[[outputs]]
+        \\source = "bin/app.exe"
+        \\publish_as = "app.exe"
+        \\mode = "0755"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_intent);
+
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    try std.testing.expectError(error.ValueInvalid, inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json));
+}
+
+test "inferLockCanonicalJsonFromIntentCanonical supports c.lib without build block" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/liba.c", .data = "int a(void){return 1;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_intent = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 1
+        \\profile = "c.lib"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[[outputs]]
+        \\source = "bin/libbundle.tar"
+        \\publish_as = "libbundle.tar"
+        \\mode = "0644"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_intent);
+
+    const parsed_intent = try abi_parser.parseLockfileStrict(allocator, source_intent);
+    defer allocator.free(parsed_intent.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromIntentCanonical(allocator, parsed_intent.canonical_json);
+    defer allocator.free(lock_json);
+
+    _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
+    var build_spec = try validator.parseBuildSpecStrict(allocator, lock_json);
+    defer build_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), build_spec.ops.len);
+    switch (build_spec.ops[1]) {
+        .archive_pack => |pack| try std.testing.expect(pack.format == .tar),
         else => return error.TestUnexpectedResult,
     }
 }
