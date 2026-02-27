@@ -66,7 +66,14 @@ fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").Bootstr
     defer if (resolved.needs_free) allocator.free(resolved.path);
 
     if (resolved.using_lock and !hasLockSuffixIgnoreCase(cli.path)) {
-        try validateLockDrift(allocator, cli.path, resolved.path, drift_category_out);
+        validateLockDrift(allocator, cli.path, resolved.path, drift_category_out) catch |err| {
+            if (err == error.LockDrift and !ci) {
+                try refreshLockFromKnxPath(allocator, cli.path, resolved.path);
+                drift_category_out.* = .none;
+            } else {
+                return err;
+            }
+        };
     } else if (!resolved.using_lock and !cli.json_output) {
         std.debug.print("Warning: building unlocked from {s}; reproducibility lock is bypassed.\n", .{cli.path});
     }
@@ -114,11 +121,14 @@ fn resolveBuildPathWithLockPolicy(allocator: std.mem.Allocator, path: []const u8
         return .{ .path = lock_path, .using_lock = true, .needs_free = true };
     }
 
-    allocator.free(lock_path);
     if (allow_unlocked) {
+        allocator.free(lock_path);
         return .{ .path = path, .using_lock = false, .needs_free = false };
     }
-    return error.LockMissing;
+
+    // Node-style local workflow: auto-create lock when missing.
+    try refreshLockFromKnxPath(allocator, path, lock_path);
+    return .{ .path = lock_path, .using_lock = true, .needs_free = true };
 }
 
 fn validateLockDrift(allocator: std.mem.Allocator, knx_path: []const u8, lock_path: []const u8, drift_category_out: *DriftCategory) !void {
@@ -177,6 +187,40 @@ fn loadCanonicalFromPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     defer allocator.free(source);
     const parsed = try abi_parser.parseLockfileStrict(allocator, source);
     return parsed.canonical_json;
+}
+
+fn refreshLockFromKnxPath(allocator: std.mem.Allocator, knx_path: []const u8, lock_path: []const u8) !void {
+    const lock_canonical = try computeExpectedLockCanonicalFromKnxPath(allocator, knx_path);
+    defer allocator.free(lock_canonical);
+    try validateLockCanonical(allocator, lock_canonical);
+    try writeFileAtomic(allocator, lock_path, lock_canonical);
+}
+
+fn validateLockCanonical(allocator: std.mem.Allocator, canonical_json: []const u8) !void {
+    _ = try validator.validateCanonicalJsonStrict(allocator, canonical_json);
+    var workspace_spec = try validator.parseWorkspaceSpecStrict(allocator, canonical_json);
+    defer workspace_spec.deinit(allocator);
+    var build_spec = try validator.parseBuildSpecStrict(allocator, canonical_json);
+    defer build_spec.deinit(allocator);
+    try validator.validateBuildWriteIsolation(&workspace_spec, &build_spec);
+    var output_spec = try validator.parseOutputSpecStrict(allocator, canonical_json);
+    defer output_spec.deinit(allocator);
+}
+
+fn writeFileAtomic(allocator: std.mem.Allocator, path: []const u8, content: []const u8) !void {
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp-{d}", .{ path, std.time.microTimestamp() });
+    defer allocator.free(tmp_path);
+    errdefer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    if (std.fs.path.dirname(path)) |dir| {
+        try std.fs.cwd().makePath(dir);
+    }
+
+    var file = try std.fs.cwd().createFile(tmp_path, .{});
+    defer file.close();
+    try file.writeAll(content);
+    try file.sync();
+    try std.fs.cwd().rename(tmp_path, path);
 }
 
 fn classifyDriftCategory(allocator: std.mem.Allocator, expected: []const u8, actual: []const u8) !DriftCategory {
