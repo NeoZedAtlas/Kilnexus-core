@@ -1,5 +1,6 @@
 const std = @import("std");
 const error_names = @import("../errors/error_names.zig");
+const bootstrap_metadata = @import("bootstrap_metadata.zig");
 
 pub const MetadataBundle = struct {
     root_json: []u8,
@@ -64,6 +65,10 @@ pub fn loadFromDir(allocator: std.mem.Allocator, trust_dir_path: []const u8) !Me
 
 pub fn loadFromDirStrict(allocator: std.mem.Allocator, trust_dir_path: []const u8) TrustError!MetadataBundle {
     return loadFromDir(allocator, trust_dir_path) catch |err| return normalizeErrorName(@errorName(err));
+}
+
+pub fn ensureBootstrapMetadataDir(allocator: std.mem.Allocator, trust_dir_path: []const u8) TrustError!bool {
+    return bootstrap_metadata.ensureMetadataDir(allocator, trust_dir_path) catch |err| return normalizeErrorName(@errorName(err));
 }
 
 pub fn verify(allocator: std.mem.Allocator, bundle: *const MetadataBundle, options: VerifyOptions) !VerificationSummary {
@@ -599,6 +604,29 @@ test "verify accepts valid mini-tuf chain" {
         .now_unix_seconds = 1_800_000_000,
     });
 
+    try std.testing.expectEqual(@as(u64, 1), summary.root_version);
+    try std.testing.expectEqual(@as(u64, 1), summary.timestamp_version);
+    try std.testing.expectEqual(@as(u64, 1), summary.snapshot_version);
+    try std.testing.expectEqual(@as(u64, 1), summary.targets_version);
+}
+
+test "ensureBootstrapMetadataDir materializes embedded metadata and verifies" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const trust_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/trust", .{tmp.sub_path[0..]});
+    defer allocator.free(trust_rel);
+
+    try std.testing.expect(try ensureBootstrapMetadataDir(allocator, trust_rel));
+    try std.testing.expect(!(try ensureBootstrapMetadataDir(allocator, trust_rel)));
+
+    var bundle = try loadFromDirStrict(allocator, trust_rel);
+    defer bundle.deinit(allocator);
+    const summary = try verifyStrict(allocator, &bundle, .{
+        .state_path = null,
+        .now_unix_seconds = 1_800_000_000,
+    });
     try std.testing.expectEqual(@as(u64, 1), summary.root_version);
     try std.testing.expectEqual(@as(u64, 1), summary.timestamp_version);
     try std.testing.expectEqual(@as(u64, 1), summary.snapshot_version);

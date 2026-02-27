@@ -115,7 +115,7 @@ fn checkTrustDirectory(allocator: std.mem.Allocator, trust_dir: ?[]const u8) !Ch
         return .{
             .name = "trust_dir",
             .status = .warn,
-            .message = "directory not found",
+            .message = "directory not found (will auto-bootstrap on build)",
         };
     };
     return .{

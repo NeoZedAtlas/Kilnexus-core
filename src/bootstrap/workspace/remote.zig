@@ -314,7 +314,25 @@ fn extractBlobToDirectory(blob_path: []const u8, output_dir: []const u8) !void {
             var decompress = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &window);
             try extractTarArchive(&out_dir, &decompress.reader);
         },
-        .raw => return error.NotImplemented,
+        .raw => {
+            var source_buffer: [64 * 1024]u8 = undefined;
+            var source_reader = blob_file.reader(&source_buffer);
+            var output = try out_dir.createFile("blob.bin", .{
+                .exclusive = true,
+                .mode = 0o644,
+            });
+            defer output.close();
+
+            var output_buffer: [8 * 1024]u8 = undefined;
+            var output_writer = output.writer(&output_buffer);
+            var chunk: [16 * 1024]u8 = undefined;
+            while (true) {
+                const read_len = try source_reader.interface.readSliceShort(&chunk);
+                if (read_len == 0) break;
+                try output_writer.interface.writeAll(chunk[0..read_len]);
+            }
+            try output_writer.interface.flush();
+        },
     }
 }
 

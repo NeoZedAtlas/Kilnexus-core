@@ -27,6 +27,11 @@ pub fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, opti
         .targets_version = 0,
     };
     if (options.trust_metadata_dir) |trust_dir_path| {
+        _ = mini_tuf.ensureBootstrapMetadataDir(allocator, trust_dir_path) catch |err| {
+            failed_at.* = .load_trust_metadata;
+            push(&trace, allocator, .failed) catch {};
+            return err;
+        };
         var bundle = mini_tuf.loadFromDirStrict(allocator, trust_dir_path) catch |err| {
             failed_at.* = .load_trust_metadata;
             push(&trace, allocator, .failed) catch {};
