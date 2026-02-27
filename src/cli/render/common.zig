@@ -4,7 +4,7 @@ const boundary_map = @import("../../errors/boundary_map.zig");
 
 pub fn printUsage() void {
     std.debug.print(
-        "Usage: Kilnexus_core [knx] <build|freeze|validate|plan|graph|doctor|clean|cache|toolchain|version> [args]\n",
+        "Usage: Kilnexus_core [knx] <build|freeze|sync|validate|plan|graph|doctor|clean|cache|toolchain|version> [args]\n",
         .{},
     );
     std.debug.print("Or: Kilnexus_core [Knxfile] (defaults to build)\n", .{});
@@ -15,6 +15,7 @@ pub fn printUsage() void {
         .{},
     );
     std.debug.print("freeze options: [Knxfile] [Knxfile.lock] --knxfile <path> --lockfile <path> --dry-run --json --help\n", .{});
+    std.debug.print("sync options: [Knxfile] [Knxfile.lock] --knxfile <path> --lockfile <path> --dry-run --json --help\n", .{});
     std.debug.print("validate options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("plan options: [Knxfile] --knxfile <path> --json --help\n", .{});
     std.debug.print("graph options: [Knxfile] --knxfile <path> --json --help\n", .{});

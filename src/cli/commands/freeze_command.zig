@@ -9,6 +9,10 @@ const v2_infer = @import("../runtime/v2_lock_infer.zig");
 const lock_metadata = @import("../runtime/lock_metadata.zig");
 
 pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    return runAs(allocator, args, "freeze");
+}
+
+pub fn runAs(allocator: std.mem.Allocator, args: []const []const u8, command_name: []const u8) !void {
     const cli = cli_args.parseFreezeCliArgs(args) catch |err| {
         if (err == error.HelpRequested) {
             cli_output.printUsage();
@@ -18,17 +22,17 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return error.InvalidCommand;
     };
 
-    runWithCli(allocator, cli) catch |err| {
+    runWithCli(allocator, cli, command_name) catch |err| {
         if (cli.json_output) {
-            try cli_output.printSimpleFailureJson(allocator, "freeze", @errorName(err));
+            try cli_output.printSimpleFailureJson(allocator, command_name, @errorName(err));
         } else {
-            cli_output.printSimpleFailureHuman("freeze", @errorName(err));
+            cli_output.printSimpleFailureHuman(command_name, @errorName(err));
         }
         return err;
     };
 }
 
-fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").FreezeCliArgs) !void {
+fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").FreezeCliArgs, command_name: []const u8) !void {
     const lock_path = if (cli.lock_path) |explicit| explicit else try deriveLockPath(allocator, cli.path);
     defer if (cli.lock_path == null) allocator.free(lock_path);
 
@@ -56,9 +60,9 @@ fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").FreezeC
         try writeFileAtomic(allocator, lock_path, lock_with_source);
     }
     if (cli.json_output) {
-        try printFreezeJson(allocator, cli.path, lock_path, knx_digest_hex[0..], lock_with_source.len, cli.dry_run);
+        try printFreezeJson(allocator, command_name, cli.path, lock_path, knx_digest_hex[0..], lock_with_source.len, cli.dry_run);
     } else {
-        printFreezeHuman(cli.path, lock_path, knx_digest_hex[0..], lock_with_source.len, cli.dry_run);
+        printFreezeHuman(command_name, cli.path, lock_path, knx_digest_hex[0..], lock_with_source.len, cli.dry_run);
     }
 }
 
@@ -112,11 +116,11 @@ fn writeFileAtomic(allocator: std.mem.Allocator, path: []const u8, content: []co
     try std.fs.cwd().rename(tmp_path, path);
 }
 
-fn printFreezeHuman(knx_path: []const u8, lock_path: []const u8, knx_digest: []const u8, bytes: usize, dry_run: bool) void {
+fn printFreezeHuman(command_name: []const u8, knx_path: []const u8, lock_path: []const u8, knx_digest: []const u8, bytes: usize, dry_run: bool) void {
     if (dry_run) {
-        std.debug.print("Freeze dry-run completed\n", .{});
+        std.debug.print("{s} dry-run completed\n", .{command_name});
     } else {
-        std.debug.print("Freeze completed\n", .{});
+        std.debug.print("{s} completed\n", .{command_name});
     }
     std.debug.print("Knxfile: {s}\n", .{knx_path});
     std.debug.print("Lockfile: {s}\n", .{lock_path});
@@ -127,6 +131,7 @@ fn printFreezeHuman(knx_path: []const u8, lock_path: []const u8, knx_digest: []c
 
 fn printFreezeJson(
     allocator: std.mem.Allocator,
+    command_name: []const u8,
     knx_path: []const u8,
     lock_path: []const u8,
     knx_digest: []const u8,
@@ -140,7 +145,9 @@ fn printFreezeJson(
     var out_adapter = out_writer.adaptToNewApi(&out_buffer);
     const writer = &out_adapter.new_interface;
 
-    try writer.writeAll("{\"status\":\"ok\",\"command\":\"freeze\",\"knxfile\":");
+    try writer.writeAll("{\"status\":\"ok\",\"command\":");
+    try std.json.Stringify.encodeJsonString(command_name, .{}, writer);
+    try writer.writeAll(",\"knxfile\":");
     try std.json.Stringify.encodeJsonString(knx_path, .{}, writer);
     try writer.writeAll(",\"lockfile\":");
     try std.json.Stringify.encodeJsonString(lock_path, .{}, writer);

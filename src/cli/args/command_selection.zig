@@ -33,6 +33,7 @@ fn isKnownCommand(token: []const u8) bool {
     return std.mem.eql(u8, token, "build") or
         std.mem.eql(u8, token, "bootstrap") or
         std.mem.eql(u8, token, "freeze") or
+        std.mem.eql(u8, token, "sync") or
         std.mem.eql(u8, token, "validate") or
         std.mem.eql(u8, token, "plan") or
         std.mem.eql(u8, token, "graph") or
@@ -49,6 +50,9 @@ fn parseNamedCommand(token: []const u8, args: []const []const u8) !types.Command
     }
     if (std.mem.eql(u8, token, "freeze")) {
         return .{ .command = .freeze, .args = args };
+    }
+    if (std.mem.eql(u8, token, "sync")) {
+        return .{ .command = .sync, .args = args };
     }
     if (std.mem.eql(u8, token, "validate")) {
         return .{ .command = .validate, .args = args };
@@ -89,6 +93,8 @@ test "selectCommand supports knx prefix and defaults" {
 
     const freeze_cmd = try selectCommand(&.{"freeze"});
     try std.testing.expectEqual(types.CliCommand.freeze, freeze_cmd.command);
+    const sync_cmd = try selectCommand(&.{"sync"});
+    try std.testing.expectEqual(types.CliCommand.sync, sync_cmd.command);
 
     const default_build = try selectCommand(&.{"Knxfile"});
     try std.testing.expectEqual(types.CliCommand.build, default_build.command);

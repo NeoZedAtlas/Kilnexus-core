@@ -104,6 +104,7 @@ pub const CleanCliArgs = struct {
 pub const CliCommand = enum {
     build,
     freeze,
+    sync,
     validate,
     plan,
     graph,

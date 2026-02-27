@@ -23,6 +23,11 @@ const OutputIntent = struct {
     mode: []const u8,
 };
 
+const Profile = enum {
+    c_app,
+    c_lib,
+};
+
 const FieldError = error{
     MissingField,
     TypeMismatch,
@@ -46,8 +51,8 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
     const version = expectIntegerField(root, "version") catch |err| return mapFieldError(err);
     if (version != 2) return error.VersionUnsupported;
 
-    const profile = expectStringField(root, "profile") catch |err| return mapFieldError(err);
-    if (!std.mem.eql(u8, profile, "c.app")) return error.OperatorDisallowed;
+    const profile_text = expectStringField(root, "profile") catch |err| return mapFieldError(err);
+    const profile = parseProfile(profile_text) catch |err| return mapFieldError(err);
 
     const target = expectStringField(root, "target") catch |err| return mapFieldError(err);
     const toolchain = expectObjectField(root, "toolchain") catch |err| return mapFieldError(err);
@@ -77,9 +82,15 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
     const exclude_patterns = parseOptionalStringArrayDup(allocator, sources, "exclude") catch |err| return mapFieldError(err);
     defer freeOwnedStrings(allocator, exclude_patterns);
 
-    const entry_host_path = expectStringField(build, "entry") catch |err| return mapFieldError(err);
-    if (!std.mem.endsWith(u8, entry_host_path, ".c")) return error.ValueInvalid;
-    if (!isValidWorkspacePath(entry_host_path)) return error.ValueInvalid;
+    const entry_host_path = switch (profile) {
+        .c_app => blk: {
+            const path = expectStringField(build, "entry") catch |err| return mapFieldError(err);
+            if (!std.mem.endsWith(u8, path, ".c")) return error.ValueInvalid;
+            if (!isValidWorkspacePath(path)) return error.ValueInvalid;
+            break :blk path;
+        },
+        .c_lib => null,
+    };
 
     const c_std = if (build.get("c_std")) |value| blk: {
         const text = expectString(value) catch |err| return mapFieldError(err);
@@ -99,6 +110,16 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
     defer include_dirs.deinit(allocator);
     var link_flags = parseOptionalStringArrayBorrow(allocator, build, "link") catch |err| return mapFieldError(err);
     defer link_flags.deinit(allocator);
+    const archive_format = if (build.get("archive_format")) |value| blk: {
+        const text = expectString(value) catch |err| return mapFieldError(err);
+        if (!std.mem.eql(u8, text, "tar") and !std.mem.eql(u8, text, "tar.gz")) return error.ValueInvalid;
+        break :blk text;
+    } else "tar";
+
+    switch (profile) {
+        .c_app => {},
+        .c_lib => if (link_flags.items.len != 0) return error.ValueInvalid,
+    }
 
     for (defines.items) |define| {
         if (!isValidDefine(define)) return error.ValueInvalid;
@@ -118,7 +139,6 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
 
     const outputs_array = expectArrayField(root, "outputs") catch |err| return mapFieldError(err);
     if (outputs_array.items.len == 0) return error.OutputInvalid;
-    if (outputs_array.items.len != 1) return error.OutputInvalid;
     var outputs: std.ArrayList(OutputIntent) = .empty;
     defer outputs.deinit(allocator);
     for (outputs_array.items) |item| {
@@ -153,7 +173,9 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
 
     var entry_found = false;
     for (expanded_files, 0..) |host_rel_path, idx| {
-        if (std.mem.eql(u8, host_rel_path, entry_host_path)) entry_found = true;
+        if (entry_host_path) |entry| {
+            if (std.mem.eql(u8, host_rel_path, entry)) entry_found = true;
+        }
         if (!std.mem.endsWith(u8, host_rel_path, ".c")) continue;
 
         const source_path = std.fmt.allocPrint(allocator, "src/{s}", .{host_rel_path}) catch return error.Internal;
@@ -172,9 +194,11 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
         }) catch return error.Internal;
     }
 
-    if (!entry_found or compile_units.items.len == 0) return error.ValueInvalid;
+    if (compile_units.items.len == 0) return error.ValueInvalid;
+    if (profile == .c_app and !entry_found) return error.ValueInvalid;
 
     const generated_lock_json = buildV1LockJson(allocator, .{
+        .profile = profile,
         .target = target,
         .toolchain_id = toolchain_id,
         .toolchain_source = toolchain_source,
@@ -195,6 +219,7 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
         .defines = defines.items,
         .include_dirs = include_dirs.items,
         .link_flags = link_flags.items,
+        .archive_format = archive_format,
         .compile_units = compile_units.items,
         .outputs = outputs.items,
     }) catch |err| return parse_errors.normalizeName(@errorName(err));
@@ -205,6 +230,7 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
 }
 
 const BuildV1Input = struct {
+    profile: Profile,
     target: []const u8,
     toolchain_id: []const u8,
     toolchain_source: []const u8,
@@ -225,6 +251,7 @@ const BuildV1Input = struct {
     defines: []const []const u8,
     include_dirs: []const []const u8,
     link_flags: []const []const u8,
+    archive_format: []const u8,
     compile_units: []const CompileUnit,
     outputs: []const OutputIntent,
 };
@@ -340,23 +367,55 @@ fn buildV1LockJson(allocator: std.mem.Allocator, input: BuildV1Input) ![]u8 {
     }
 
     try writer.writeAll(",");
-    try writer.writeAll("{\"id\":\"link-final\",\"run\":\"knx.zig.link\",\"inputs\":[");
-    for (input.compile_units, 0..) |unit, i| {
-        if (i != 0) try writer.writeAll(",");
-        try std.json.Stringify.encodeJsonString(unit.object_path, .{}, writer);
+    switch (input.profile) {
+        .c_app => {
+            try writer.writeAll("{\"id\":\"link-final\",\"run\":\"knx.zig.link\",\"inputs\":[");
+            for (input.compile_units, 0..) |unit, i| {
+                if (i != 0) try writer.writeAll(",");
+                try std.json.Stringify.encodeJsonString(unit.object_path, .{}, writer);
+            }
+            try writer.writeAll("],\"outputs\":[");
+            try std.json.Stringify.encodeJsonString(input.outputs[0].source, .{}, writer);
+            try writer.writeAll("]");
+            if (input.link_flags.len > 0) {
+                try writer.writeAll(",\"flags\":[");
+                for (input.link_flags, 0..) |flag, i| {
+                    if (i != 0) try writer.writeAll(",");
+                    try std.json.Stringify.encodeJsonString(flag, .{}, writer);
+                }
+                try writer.writeAll("]");
+            }
+            try writer.writeAll("}");
+        },
+        .c_lib => {
+            try writer.writeAll("{\"id\":\"archive-final\",\"run\":\"knx.archive.pack\",\"inputs\":[");
+            for (input.compile_units, 0..) |unit, i| {
+                if (i != 0) try writer.writeAll(",");
+                try std.json.Stringify.encodeJsonString(unit.object_path, .{}, writer);
+            }
+            try writer.writeAll("],\"outputs\":[");
+            try std.json.Stringify.encodeJsonString(input.outputs[0].source, .{}, writer);
+            try writer.writeAll("]");
+            if (!std.mem.eql(u8, input.archive_format, "tar")) {
+                try writer.writeAll(",\"format\":");
+                try std.json.Stringify.encodeJsonString(input.archive_format, .{}, writer);
+            }
+            try writer.writeAll("}");
+        },
     }
-    try writer.writeAll("],\"outputs\":[");
-    try std.json.Stringify.encodeJsonString(input.outputs[0].source, .{}, writer);
-    try writer.writeAll("]");
-    if (input.link_flags.len > 0) {
-        try writer.writeAll(",\"flags\":[");
-        for (input.link_flags, 0..) |flag, i| {
-            if (i != 0) try writer.writeAll(",");
-            try std.json.Stringify.encodeJsonString(flag, .{}, writer);
-        }
-        try writer.writeAll("]");
+
+    for (input.outputs[1..], 0..) |entry, copy_idx| {
+        if (std.mem.eql(u8, entry.source, input.outputs[0].source)) continue;
+        try writer.writeAll(",{\"id\":");
+        const copy_id = try std.fmt.allocPrint(allocator, "copy-output-{d}", .{copy_idx + 1});
+        defer allocator.free(copy_id);
+        try std.json.Stringify.encodeJsonString(copy_id, .{}, writer);
+        try writer.writeAll(",\"run\":\"knx.fs.copy\",\"inputs\":[");
+        try std.json.Stringify.encodeJsonString(input.outputs[0].source, .{}, writer);
+        try writer.writeAll("],\"outputs\":[");
+        try std.json.Stringify.encodeJsonString(entry.source, .{}, writer);
+        try writer.writeAll("]}");
     }
-    try writer.writeAll("}");
     try writer.writeAll("]");
 
     try writer.writeAll(",\"outputs\":[");
@@ -573,6 +632,12 @@ fn mapFieldError(err: anyerror) parse_errors.ParseError {
     return parse_errors.normalizeName(@errorName(err));
 }
 
+fn parseProfile(text: []const u8) FieldError!Profile {
+    if (std.mem.eql(u8, text, "c.app")) return .c_app;
+    if (std.mem.eql(u8, text, "c.lib")) return .c_lib;
+    return error.OperatorDisallowed;
+}
+
 test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.app" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -641,4 +706,149 @@ test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.app" {
     var build_spec = try validator.parseBuildSpecStrict(allocator, lock_json);
     defer build_spec.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 3), build_spec.ops.len);
+}
+
+test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.lib" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/liba.c", .data = "int a(void){return 1;}\n" });
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/libb.c", .data = "int b(void){return 2;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_v2 = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 2
+        \\profile = "c.lib"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[policy]
+        \\network = "off"
+        \\verify_mode = "strict"
+        \\clock = "fixed"
+        \\
+        \\[env]
+        \\TZ = "UTC"
+        \\LANG = "C"
+        \\SOURCE_DATE_EPOCH = "1735689600"
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[build]
+        \\c_std = "c11"
+        \\opt = "O2"
+        \\archive_format = "tar.gz"
+        \\
+        \\[[outputs]]
+        \\source = "bin/libbundle.tar.gz"
+        \\publish_as = "libbundle.tar.gz"
+        \\mode = "0644"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_v2);
+
+    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
+    defer allocator.free(parsed_v2.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json);
+    defer allocator.free(lock_json);
+
+    _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
+    var build_spec = try validator.parseBuildSpecStrict(allocator, lock_json);
+    defer build_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), build_spec.ops.len);
+    switch (build_spec.ops[2]) {
+        .archive_pack => |pack| try std.testing.expect(pack.format == .tar_gz),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "inferLockCanonicalJsonFromV2Canonical supports multiple outputs via fs.copy fanout" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/main.c", .data = "int main(void){return 0;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+    const main_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/main.c", .{tmp.sub_path[0..]});
+    defer allocator.free(main_rel);
+
+    const source_v2 = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 2
+        \\profile = "c.app"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[policy]
+        \\network = "off"
+        \\verify_mode = "strict"
+        \\clock = "fixed"
+        \\
+        \\[env]
+        \\TZ = "UTC"
+        \\LANG = "C"
+        \\SOURCE_DATE_EPOCH = "1735689600"
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[build]
+        \\entry = "{s}"
+        \\c_std = "c11"
+        \\opt = "O2"
+        \\
+        \\[[outputs]]
+        \\source = "bin/app.exe"
+        \\publish_as = "app.exe"
+        \\mode = "0755"
+        \\
+        \\[[outputs]]
+        \\source = "dist/app-copy.exe"
+        \\publish_as = "app-copy.exe"
+        \\mode = "0755"
+    ,
+        .{ include_pat, main_rel },
+    );
+    defer allocator.free(source_v2);
+
+    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
+    defer allocator.free(parsed_v2.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json);
+    defer allocator.free(lock_json);
+
+    _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
+    var build_spec = try validator.parseBuildSpecStrict(allocator, lock_json);
+    defer build_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), build_spec.ops.len);
+    switch (build_spec.ops[2]) {
+        .fs_copy => |copy| {
+            try std.testing.expectEqualStrings("bin/app.exe", copy.from_path);
+            try std.testing.expectEqualStrings("dist/app-copy.exe", copy.to_path);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
