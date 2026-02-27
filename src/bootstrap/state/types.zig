@@ -78,6 +78,13 @@ pub const RunOptions = struct {
     trust_state_path: ?[]const u8 = ".kilnexus-trust-state.json",
     cache_root: []const u8 = ".kilnexus-cache",
     output_root: []const u8 = "kilnexus-out",
+    remote_download_attempts: u8 = 3,
+    remote_download_timeout_ms: u64 = 30_000,
+    remote_download_max_bytes: u64 = 1024 * 1024 * 1024,
+    remote_extract_max_files: usize = 100_000,
+    remote_extract_max_total_bytes: u64 = 4 * 1024 * 1024 * 1024,
+    remote_extract_max_file_bytes: u64 = 512 * 1024 * 1024,
+    allow_insecure_http_source: bool = false,
 };
 
 pub const max_knxfile_bytes: usize = 4 * 1024 * 1024;

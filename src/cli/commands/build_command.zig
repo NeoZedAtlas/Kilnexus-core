@@ -44,6 +44,8 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 std.debug.print("Drift category: {s}\n", .{driftCategoryName(drift_category)});
             } else if (err == error.AllowUnlockedForbidden) {
                 std.debug.print("CI is enabled; refusing --allow-unlocked for {s}.\n", .{cli.path});
+            } else if (err == error.CiLockfileRequired) {
+                std.debug.print("CI strict mode requires explicit .lock path. Use `knx build {s}.lock`.\n", .{cli.path});
             }
             cli_output.printSimpleFailureHuman("build", @errorName(err));
         }
@@ -52,7 +54,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn runWithCli(allocator: std.mem.Allocator, cli: @import("../types.zig").BootstrapCliArgs, drift_category_out: *DriftCategory) !void {
-    if (cli.allow_unlocked and isCiEnvironment() and !isAllowUnlockedCiOverrideEnabled()) {
+    const ci = isCiEnvironment();
+    if (ci and !hasLockSuffixIgnoreCase(cli.path)) {
+        return error.CiLockfileRequired;
+    }
+    if (cli.allow_unlocked and ci and !isAllowUnlockedCiOverrideEnabled()) {
         return error.AllowUnlockedForbidden;
     }
 
@@ -446,4 +452,9 @@ fn isAllowUnlockedCiOverrideEnabled() bool {
     const enabled = std.process.getEnvVarOwned(std.heap.page_allocator, "KNX_ALLOW_UNLOCKED_IN_CI") catch return false;
     defer std.heap.page_allocator.free(enabled);
     return std.mem.eql(u8, enabled, "1") or std.ascii.eqlIgnoreCase(enabled, "true");
+}
+
+test "ci strict path requirement enforces .lock suffix check" {
+    try std.testing.expect(hasLockSuffixIgnoreCase("Knxfile.lock"));
+    try std.testing.expect(!hasLockSuffixIgnoreCase("Knxfile"));
 }

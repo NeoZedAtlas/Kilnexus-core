@@ -14,6 +14,7 @@ pub fn printUsage() void {
         "build options: --knxfile <path> --trust-off --trust-dir <dir> --trust-state <path|off> --cache-root <dir> --output-root <dir> --allow-unlocked --json --help (defaults to <Knxfile>.lock)\n",
         .{},
     );
+    std.debug.print("CI strict: pass explicit .lock path to build (e.g. knx build Knxfile.lock)\n", .{});
     std.debug.print("freeze options: [Knxfile] [Knxfile.lock] --knxfile <path> --lockfile <path> --dry-run --json --help\n", .{});
     std.debug.print("sync options: [Knxfile] [Knxfile.lock] --knxfile <path> --lockfile <path> --dry-run --json --help\n", .{});
     std.debug.print("validate options: [Knxfile] --knxfile <path> --json --help\n", .{});

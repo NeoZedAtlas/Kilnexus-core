@@ -30,6 +30,7 @@ pub const BuildError = error{
     LockMissing,
     LockDrift,
     AllowUnlockedForbidden,
+    CiLockfileRequired,
     Internal,
 };
 

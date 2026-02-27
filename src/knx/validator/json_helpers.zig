@@ -210,6 +210,7 @@ fn isAllowedIncludePath(path: []const u8) bool {
 
 pub fn isAllowedLinkArg(arg: []const u8) bool {
     const allowed = [_][]const u8{
+        "-shared",
         "-static",
         "-s",
         "-Wl,--gc-sections",
@@ -217,6 +218,12 @@ pub fn isAllowedLinkArg(arg: []const u8) bool {
     };
     for (allowed) |item| {
         if (std.mem.eql(u8, arg, item)) return true;
+    }
+    if (std.mem.startsWith(u8, arg, "-Wl,-soname,")) {
+        const soname = arg["-Wl,-soname,".len..];
+        if (soname.len == 0) return false;
+        validatePublishName(soname) catch return false;
+        return true;
     }
     return false;
 }
@@ -350,4 +357,10 @@ test "isAllowedCompileArg accepts constrained -D and -I" {
     try std.testing.expect(!isAllowedCompileArg("-DHELLO value"));
     try std.testing.expect(!isAllowedCompileArg("-I../include"));
     try std.testing.expect(!isAllowedCompileArg("-I"));
+}
+
+test "isAllowedLinkArg accepts shared and constrained soname" {
+    try std.testing.expect(isAllowedLinkArg("-shared"));
+    try std.testing.expect(isAllowedLinkArg("-Wl,-soname,libdemo.so"));
+    try std.testing.expect(!isAllowedLinkArg("-Wl,-soname,../escape.so"));
 }

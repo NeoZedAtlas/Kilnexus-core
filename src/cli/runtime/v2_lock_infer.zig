@@ -26,6 +26,7 @@ const OutputIntent = struct {
 const Profile = enum {
     c_app,
     c_lib,
+    c_shared,
 };
 
 const FieldError = error{
@@ -78,9 +79,11 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
     const include_patterns = parseStringArrayDup(allocator, sources, "include") catch |err| return mapFieldError(err);
     defer freeOwnedStrings(allocator, include_patterns);
     if (include_patterns.len == 0) return error.MissingField;
+    ensureOnlyKeys(sources, &.{ "include", "exclude" }) catch |err| return mapFieldError(err);
 
     const exclude_patterns = parseOptionalStringArrayDup(allocator, sources, "exclude") catch |err| return mapFieldError(err);
     defer freeOwnedStrings(allocator, exclude_patterns);
+    validateBuildFieldSet(profile, build) catch |err| return mapFieldError(err);
 
     const entry_host_path = switch (profile) {
         .c_app => blk: {
@@ -89,7 +92,7 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
             if (!isValidWorkspacePath(path)) return error.ValueInvalid;
             break :blk path;
         },
-        .c_lib => null,
+        .c_lib, .c_shared => null,
     };
 
     const c_std = if (build.get("c_std")) |value| blk: {
@@ -119,6 +122,7 @@ pub fn inferLockCanonicalJsonFromV2Canonical(
     switch (profile) {
         .c_app => {},
         .c_lib => if (link_flags.items.len != 0) return error.ValueInvalid,
+        .c_shared => {},
     }
 
     for (defines.items) |define| {
@@ -402,6 +406,22 @@ fn buildV1LockJson(allocator: std.mem.Allocator, input: BuildV1Input) ![]u8 {
             }
             try writer.writeAll("}");
         },
+        .c_shared => {
+            try writer.writeAll("{\"id\":\"link-shared\",\"run\":\"knx.zig.link\",\"inputs\":[");
+            for (input.compile_units, 0..) |unit, i| {
+                if (i != 0) try writer.writeAll(",");
+                try std.json.Stringify.encodeJsonString(unit.object_path, .{}, writer);
+            }
+            try writer.writeAll("],\"outputs\":[");
+            try std.json.Stringify.encodeJsonString(input.outputs[0].source, .{}, writer);
+            try writer.writeAll("],\"flags\":[");
+            try std.json.Stringify.encodeJsonString("-shared", .{}, writer);
+            for (input.link_flags) |flag| {
+                try writer.writeAll(",");
+                try std.json.Stringify.encodeJsonString(flag, .{}, writer);
+            }
+            try writer.writeAll("]}");
+        },
     }
 
     for (input.outputs[1..], 0..) |entry, copy_idx| {
@@ -559,6 +579,7 @@ fn isAllowedOpt(value: []const u8) bool {
 
 fn isAllowedLinkArg(arg: []const u8) bool {
     const allowed = [_][]const u8{
+        "-shared",
         "-static",
         "-s",
         "-Wl,--gc-sections",
@@ -566,6 +587,10 @@ fn isAllowedLinkArg(arg: []const u8) bool {
     };
     for (allowed) |item| {
         if (std.mem.eql(u8, arg, item)) return true;
+    }
+    if (std.mem.startsWith(u8, arg, "-Wl,-soname,")) {
+        const soname = arg["-Wl,-soname,".len..];
+        return isValidPublishName(soname);
     }
     return false;
 }
@@ -635,7 +660,34 @@ fn mapFieldError(err: anyerror) parse_errors.ParseError {
 fn parseProfile(text: []const u8) FieldError!Profile {
     if (std.mem.eql(u8, text, "c.app")) return .c_app;
     if (std.mem.eql(u8, text, "c.lib")) return .c_lib;
+    if (std.mem.eql(u8, text, "c.shared")) return .c_shared;
     return error.OperatorDisallowed;
+}
+
+fn validateBuildFieldSet(profile: Profile, build: std.json.ObjectMap) FieldError!void {
+    const keys_c_app = [_][]const u8{ "entry", "c_std", "opt", "defines", "include_dirs", "link" };
+    const keys_c_lib = [_][]const u8{ "c_std", "opt", "defines", "include_dirs", "archive_format" };
+    const keys_c_shared = [_][]const u8{ "c_std", "opt", "defines", "include_dirs", "link" };
+    const allowed: []const []const u8 = switch (profile) {
+        .c_app => keys_c_app[0..],
+        .c_lib => keys_c_lib[0..],
+        .c_shared => keys_c_shared[0..],
+    };
+    try ensureOnlyKeys(build, allowed);
+}
+
+fn ensureOnlyKeys(object: std.json.ObjectMap, allowed: []const []const u8) FieldError!void {
+    var it = object.iterator();
+    while (it.next()) |entry| {
+        var found = false;
+        for (allowed) |key| {
+            if (std.mem.eql(u8, entry.key_ptr.*, key)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return error.ValueInvalid;
+    }
 }
 
 test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.app" {
@@ -851,4 +903,134 @@ test "inferLockCanonicalJsonFromV2Canonical supports multiple outputs via fs.cop
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "inferLockCanonicalJsonFromV2Canonical builds v1 lock for c.shared" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/liba.c", .data = "int a(void){return 1;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_v2 = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 2
+        \\profile = "c.shared"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[policy]
+        \\network = "off"
+        \\verify_mode = "strict"
+        \\clock = "fixed"
+        \\
+        \\[env]
+        \\TZ = "UTC"
+        \\LANG = "C"
+        \\SOURCE_DATE_EPOCH = "1735689600"
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[build]
+        \\c_std = "c11"
+        \\opt = "O2"
+        \\link = ["-Wl,-soname,libdemo.so"]
+        \\
+        \\[[outputs]]
+        \\source = "bin/libdemo.so"
+        \\publish_as = "libdemo.so"
+        \\mode = "0755"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_v2);
+
+    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
+    defer allocator.free(parsed_v2.canonical_json);
+    const lock_json = try inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json);
+    defer allocator.free(lock_json);
+
+    _ = try validator.validateCanonicalJsonStrict(allocator, lock_json);
+    var build_spec = try validator.parseBuildSpecStrict(allocator, lock_json);
+    defer build_spec.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), build_spec.ops.len);
+    switch (build_spec.ops[1]) {
+        .zig_link => |link| {
+            var found_shared = false;
+            for (link.args) |arg| {
+                if (std.mem.eql(u8, arg, "-shared")) found_shared = true;
+            }
+            try std.testing.expect(found_shared);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "inferLockCanonicalJsonFromV2Canonical rejects profile-incompatible build fields" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("proj/src");
+    try tmp.dir.writeFile(.{ .sub_path = "proj/src/liba.c", .data = "int a(void){return 1;}\n" });
+
+    const include_pat = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/proj/src/*.c", .{tmp.sub_path[0..]});
+    defer allocator.free(include_pat);
+
+    const source_v2 = try std.fmt.allocPrint(
+        allocator,
+        \\#!knxfile
+        \\version = 2
+        \\profile = "c.lib"
+        \\target = "x86_64-windows-gnu"
+        \\
+        \\[toolchain]
+        \\id = "zigcc-0.15.2-win64"
+        \\source = "examples/real-c/toolchain/zig-win-0.15.2.tar.gz"
+        \\blob_sha256 = "7672ea8ee561a77a1d69bd716562be8ae594a97c5f053bac05ac4c6d73e1f1da"
+        \\tree_root = "dec4aa4dbe7ccaec0bac913f77e69350a53d46096c6529912e987cde018ee1fc"
+        \\size = 83562220
+        \\
+        \\[policy]
+        \\network = "off"
+        \\verify_mode = "strict"
+        \\clock = "fixed"
+        \\
+        \\[env]
+        \\TZ = "UTC"
+        \\LANG = "C"
+        \\SOURCE_DATE_EPOCH = "1735689600"
+        \\
+        \\[sources]
+        \\include = ["{s}"]
+        \\
+        \\[build]
+        \\entry = "src/main.c"
+        \\c_std = "c11"
+        \\opt = "O2"
+        \\
+        \\[[outputs]]
+        \\source = "bin/libbundle.tar"
+        \\publish_as = "libbundle.tar"
+        \\mode = "0644"
+    ,
+        .{include_pat},
+    );
+    defer allocator.free(source_v2);
+
+    const parsed_v2 = try abi_parser.parseLockfileStrict(allocator, source_v2);
+    defer allocator.free(parsed_v2.canonical_json);
+    try std.testing.expectError(error.ValueInvalid, inferLockCanonicalJsonFromV2Canonical(allocator, parsed_v2.canonical_json));
 }

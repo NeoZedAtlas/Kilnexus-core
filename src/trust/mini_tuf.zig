@@ -29,6 +29,16 @@ pub const VerificationSummary = struct {
     targets_version: u64,
 };
 
+const PersistedState = struct {
+    summary: VerificationSummary,
+    trusted_root_json: ?[]u8 = null,
+
+    fn deinit(self: *PersistedState, allocator: std.mem.Allocator) void {
+        if (self.trusted_root_json) |text| allocator.free(text);
+        self.* = undefined;
+    }
+};
+
 pub const TrustError = error{
     MetadataMissing,
     MetadataMalformed,
@@ -102,9 +112,23 @@ pub fn verify(allocator: std.mem.Allocator, bundle: *const MetadataBundle, optio
     };
 
     if (options.state_path) |state_path| {
-        const previous = try loadPersistedState(allocator, state_path);
-        try enforceRollback(previous, summary);
-        try persistStateAtomically(state_path, summary);
+        var previous = try loadPersistedState(allocator, state_path);
+        defer previous.deinit(allocator);
+        try enforceRollback(previous.summary, summary);
+
+        if (previous.trusted_root_json) |previous_root_json| {
+            if (summary.root_version > previous.summary.root_version) {
+                try verifyRootSignedByPrevious(allocator, previous_root_json, root_doc.value, now_unix);
+            } else if (summary.root_version == previous.summary.root_version) {
+                const previous_signed = try canonicalRootSignedFromSlice(allocator, previous_root_json);
+                defer allocator.free(previous_signed);
+                const current_signed = try canonicalRootSignedFromDocument(allocator, root_doc.value);
+                defer allocator.free(current_signed);
+                if (!std.mem.eql(u8, previous_signed, current_signed)) return error.InvalidMetadataVersion;
+            }
+        }
+
+        try persistStateAtomically(allocator, state_path, summary, bundle.root_json);
     }
 
     return summary;
@@ -351,13 +375,48 @@ fn verifyNotExpired(expires: []const u8, now_unix: i64) !void {
     if (now_unix > expires_unix) return error.MetadataExpired;
 }
 
-fn loadPersistedState(allocator: std.mem.Allocator, state_path: []const u8) !VerificationSummary {
+fn verifyRootSignedByPrevious(
+    allocator: std.mem.Allocator,
+    previous_root_json: []const u8,
+    current_root_document: std.json.Value,
+    now_unix: i64,
+) !void {
+    const previous_doc = try std.json.parseFromSlice(std.json.Value, allocator, previous_root_json, .{});
+    defer previous_doc.deinit();
+    var previous_trust = try parseRootTrust(allocator, previous_doc.value);
+    defer previous_trust.deinit(allocator);
+    _ = try verifySignedMetadata(
+        allocator,
+        current_root_document,
+        "root",
+        previous_trust.root,
+        now_unix,
+        &previous_trust.keys,
+    );
+}
+
+fn canonicalRootSignedFromSlice(allocator: std.mem.Allocator, root_json: []const u8) ![]u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, root_json, .{});
+    defer parsed.deinit();
+    return canonicalRootSignedFromDocument(allocator, parsed.value);
+}
+
+fn canonicalRootSignedFromDocument(allocator: std.mem.Allocator, document_value: std.json.Value) ![]u8 {
+    const root_obj = try expectObject(document_value, "root document");
+    const signed_value = root_obj.get("signed") orelse return error.MissingSignedSection;
+    return canonicalizeJsonValueAlloc(allocator, signed_value);
+}
+
+fn loadPersistedState(allocator: std.mem.Allocator, state_path: []const u8) !PersistedState {
     const bytes = std.fs.cwd().readFileAlloc(allocator, state_path, max_state_bytes) catch |err| switch (err) {
         error.FileNotFound => return .{
-            .root_version = 0,
-            .timestamp_version = 0,
-            .snapshot_version = 0,
-            .targets_version = 0,
+            .summary = .{
+                .root_version = 0,
+                .timestamp_version = 0,
+                .snapshot_version = 0,
+                .targets_version = 0,
+            },
+            .trusted_root_json = null,
         },
         else => return err,
     };
@@ -367,11 +426,20 @@ fn loadPersistedState(allocator: std.mem.Allocator, state_path: []const u8) !Ver
     defer parsed.deinit();
     const root = try expectObject(parsed.value, "state");
 
+    const trusted_root_json = if (root.get("trusted_root_json")) |value| blk: {
+        const text = try expectString(value, "trusted_root_json");
+        if (text.len == 0) break :blk null;
+        break :blk try allocator.dupe(u8, text);
+    } else null;
+
     return .{
-        .root_version = try readStateVersion(root, "root"),
-        .timestamp_version = try readStateVersion(root, "timestamp"),
-        .snapshot_version = try readStateVersion(root, "snapshot"),
-        .targets_version = try readStateVersion(root, "targets"),
+        .summary = .{
+            .root_version = try readStateVersion(root, "root"),
+            .timestamp_version = try readStateVersion(root, "timestamp"),
+            .snapshot_version = try readStateVersion(root, "snapshot"),
+            .targets_version = try readStateVersion(root, "targets"),
+        },
+        .trusted_root_json = trusted_root_json,
     };
 }
 
@@ -382,8 +450,13 @@ fn readStateVersion(state: std.json.ObjectMap, key: []const u8) !u64 {
     return @as(u64, @intCast(as_int));
 }
 
-fn persistStateAtomically(state_path: []const u8, summary: VerificationSummary) !void {
-    var buffer: [512]u8 = undefined;
+fn persistStateAtomically(
+    allocator: std.mem.Allocator,
+    state_path: []const u8,
+    summary: VerificationSummary,
+    trusted_root_json: []const u8,
+) !void {
+    var buffer: [4096]u8 = undefined;
     var atomic_file = try std.fs.cwd().atomicFile(state_path, .{
         .mode = 0o644,
         .make_path = true,
@@ -391,15 +464,25 @@ fn persistStateAtomically(state_path: []const u8, summary: VerificationSummary) 
     });
     defer atomic_file.deinit();
 
-    try atomic_file.file_writer.interface.print(
-        "{{\"root\":{d},\"timestamp\":{d},\"snapshot\":{d},\"targets\":{d}}}",
-        .{
-            summary.root_version,
-            summary.timestamp_version,
-            summary.snapshot_version,
-            summary.targets_version,
-        },
-    );
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var out_writer = out.writer(allocator);
+    var out_buf: [4096]u8 = undefined;
+    var out_adapter = out_writer.adaptToNewApi(&out_buf);
+    const writer = &out_adapter.new_interface;
+    try writer.writeAll("{\"root\":");
+    try writer.print("{d}", .{summary.root_version});
+    try writer.writeAll(",\"timestamp\":");
+    try writer.print("{d}", .{summary.timestamp_version});
+    try writer.writeAll(",\"snapshot\":");
+    try writer.print("{d}", .{summary.snapshot_version});
+    try writer.writeAll(",\"targets\":");
+    try writer.print("{d}", .{summary.targets_version});
+    try writer.writeAll(",\"trusted_root_json\":");
+    try std.json.Stringify.encodeJsonString(trusted_root_json, .{}, writer);
+    try writer.writeAll("}");
+    try writer.flush();
+    try atomic_file.file_writer.interface.writeAll(out.items);
     try atomic_file.finish();
 }
 
@@ -649,6 +732,136 @@ test "verify rejects rollback" {
     try std.testing.expectError(error.RollbackDetected, enforceRollback(previous, current));
 }
 
+test "verify enforces root rotation signatures from previous trusted root" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const old_key = std.crypto.sign.Ed25519.KeyPair.generateDeterministic([_]u8{1} ** 32) catch unreachable;
+    const new_key = std.crypto.sign.Ed25519.KeyPair.generateDeterministic([_]u8{2} ** 32) catch unreachable;
+    const old_id = "root-old";
+    const new_id = "root-new";
+    const old_pub = std.fmt.bytesToHex(old_key.public_key.toBytes(), .lower);
+    const new_pub = std.fmt.bytesToHex(new_key.public_key.toBytes(), .lower);
+
+    const root_v1_signed = try std.fmt.allocPrint(
+        allocator,
+        "{{\"_type\":\"root\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"keys\":{{\"{s}\":{{\"keytype\":\"ed25519\",\"scheme\":\"ed25519\",\"keyval\":{{\"public\":\"{s}\"}}}}}},\"roles\":{{\"root\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"targets\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"snapshot\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"timestamp\":{{\"keyids\":[\"{s}\"],\"threshold\":1}}}}}}",
+        .{ old_id, old_pub, old_id, old_id, old_id, old_id },
+    );
+    defer allocator.free(root_v1_signed);
+    const root_v1_doc = try signRoleDocument(allocator, old_key, old_id, root_v1_signed);
+    defer allocator.free(root_v1_doc);
+
+    const root_v2_signed = try std.fmt.allocPrint(
+        allocator,
+        "{{\"_type\":\"root\",\"version\":2,\"expires\":\"2099-01-01T00:00:00Z\",\"keys\":{{\"{s}\":{{\"keytype\":\"ed25519\",\"scheme\":\"ed25519\",\"keyval\":{{\"public\":\"{s}\"}}}},\"{s}\":{{\"keytype\":\"ed25519\",\"scheme\":\"ed25519\",\"keyval\":{{\"public\":\"{s}\"}}}}}},\"roles\":{{\"root\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"targets\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"snapshot\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"timestamp\":{{\"keyids\":[\"{s}\"],\"threshold\":1}}}}}}",
+        .{ old_id, old_pub, new_id, new_pub, new_id, new_id, new_id, new_id },
+    );
+    defer allocator.free(root_v2_signed);
+    const root_v2_doc = try signRoleDocumentMulti(allocator, root_v2_signed, &.{
+        .{ .keyid = old_id, .key_pair = old_key },
+        .{ .keyid = new_id, .key_pair = new_key },
+    });
+    defer allocator.free(root_v2_doc);
+
+    const timestamp_signed = "{\"_type\":\"timestamp\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"meta\":{\"snapshot.json\":{\"version\":1}}}";
+    const snapshot_signed = "{\"_type\":\"snapshot\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"meta\":{\"targets.json\":{\"version\":1}}}";
+    const targets_signed = "{\"_type\":\"targets\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"targets\":{}}";
+    const timestamp_doc = try signRoleDocument(allocator, new_key, new_id, timestamp_signed);
+    defer allocator.free(timestamp_doc);
+    const snapshot_doc = try signRoleDocument(allocator, new_key, new_id, snapshot_signed);
+    defer allocator.free(snapshot_doc);
+    const targets_doc = try signRoleDocument(allocator, new_key, new_id, targets_signed);
+    defer allocator.free(targets_doc);
+
+    const state_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/state.json", .{tmp.sub_path[0..]});
+    defer allocator.free(state_path);
+    try persistStateAtomically(allocator, state_path, .{
+        .root_version = 1,
+        .timestamp_version = 0,
+        .snapshot_version = 0,
+        .targets_version = 0,
+    }, root_v1_doc);
+
+    var bundle: MetadataBundle = .{
+        .root_json = try allocator.dupe(u8, root_v2_doc),
+        .timestamp_json = try allocator.dupe(u8, timestamp_doc),
+        .snapshot_json = try allocator.dupe(u8, snapshot_doc),
+        .targets_json = try allocator.dupe(u8, targets_doc),
+    };
+    defer bundle.deinit(allocator);
+
+    const summary = try verifyStrict(allocator, &bundle, .{
+        .state_path = state_path,
+        .now_unix_seconds = 1_800_000_000,
+    });
+    try std.testing.expectEqual(@as(u64, 2), summary.root_version);
+}
+
+test "verify rejects root rotation missing previous-root signature" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const old_key = std.crypto.sign.Ed25519.KeyPair.generateDeterministic([_]u8{3} ** 32) catch unreachable;
+    const new_key = std.crypto.sign.Ed25519.KeyPair.generateDeterministic([_]u8{4} ** 32) catch unreachable;
+    const old_id = "root-old";
+    const new_id = "root-new";
+    const old_pub = std.fmt.bytesToHex(old_key.public_key.toBytes(), .lower);
+    const new_pub = std.fmt.bytesToHex(new_key.public_key.toBytes(), .lower);
+
+    const root_v1_signed = try std.fmt.allocPrint(
+        allocator,
+        "{{\"_type\":\"root\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"keys\":{{\"{s}\":{{\"keytype\":\"ed25519\",\"scheme\":\"ed25519\",\"keyval\":{{\"public\":\"{s}\"}}}}}},\"roles\":{{\"root\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"targets\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"snapshot\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"timestamp\":{{\"keyids\":[\"{s}\"],\"threshold\":1}}}}}}",
+        .{ old_id, old_pub, old_id, old_id, old_id, old_id },
+    );
+    defer allocator.free(root_v1_signed);
+    const root_v1_doc = try signRoleDocument(allocator, old_key, old_id, root_v1_signed);
+    defer allocator.free(root_v1_doc);
+
+    const root_v2_signed = try std.fmt.allocPrint(
+        allocator,
+        "{{\"_type\":\"root\",\"version\":2,\"expires\":\"2099-01-01T00:00:00Z\",\"keys\":{{\"{s}\":{{\"keytype\":\"ed25519\",\"scheme\":\"ed25519\",\"keyval\":{{\"public\":\"{s}\"}}}},\"{s}\":{{\"keytype\":\"ed25519\",\"scheme\":\"ed25519\",\"keyval\":{{\"public\":\"{s}\"}}}}}},\"roles\":{{\"root\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"targets\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"snapshot\":{{\"keyids\":[\"{s}\"],\"threshold\":1}},\"timestamp\":{{\"keyids\":[\"{s}\"],\"threshold\":1}}}}}}",
+        .{ old_id, old_pub, new_id, new_pub, new_id, new_id, new_id, new_id },
+    );
+    defer allocator.free(root_v2_signed);
+    const root_v2_doc = try signRoleDocument(allocator, new_key, new_id, root_v2_signed);
+    defer allocator.free(root_v2_doc);
+
+    const timestamp_signed = "{\"_type\":\"timestamp\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"meta\":{\"snapshot.json\":{\"version\":1}}}";
+    const snapshot_signed = "{\"_type\":\"snapshot\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"meta\":{\"targets.json\":{\"version\":1}}}";
+    const targets_signed = "{\"_type\":\"targets\",\"version\":1,\"expires\":\"2099-01-01T00:00:00Z\",\"targets\":{}}";
+    const timestamp_doc = try signRoleDocument(allocator, new_key, new_id, timestamp_signed);
+    defer allocator.free(timestamp_doc);
+    const snapshot_doc = try signRoleDocument(allocator, new_key, new_id, snapshot_signed);
+    defer allocator.free(snapshot_doc);
+    const targets_doc = try signRoleDocument(allocator, new_key, new_id, targets_signed);
+    defer allocator.free(targets_doc);
+
+    const state_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/state.json", .{tmp.sub_path[0..]});
+    defer allocator.free(state_path);
+    try persistStateAtomically(allocator, state_path, .{
+        .root_version = 1,
+        .timestamp_version = 0,
+        .snapshot_version = 0,
+        .targets_version = 0,
+    }, root_v1_doc);
+
+    var bundle: MetadataBundle = .{
+        .root_json = try allocator.dupe(u8, root_v2_doc),
+        .timestamp_json = try allocator.dupe(u8, timestamp_doc),
+        .snapshot_json = try allocator.dupe(u8, snapshot_doc),
+        .targets_json = try allocator.dupe(u8, targets_doc),
+    };
+    defer bundle.deinit(allocator);
+
+    try std.testing.expectError(error.SignatureThresholdNotMet, verifyStrict(allocator, &bundle, .{
+        .state_path = state_path,
+        .now_unix_seconds = 1_800_000_000,
+    }));
+}
+
 test "normalizeError maps raw errors into canonical trust errors" {
     try std.testing.expect(normalizeErrorName("InvalidThreshold") == error.RolePolicyInvalid);
     try std.testing.expect(normalizeErrorName("InvalidTimestampFormat") == error.MetadataExpired);
@@ -681,4 +894,45 @@ fn signRoleDocument(
         "{{\"signed\":{s},\"signatures\":[{{\"keyid\":\"{s}\",\"sig\":\"{s}\"}}]}}",
         .{ signed_json, keyid, sig_hex },
     );
+}
+
+const Signer = struct {
+    keyid: []const u8,
+    key_pair: std.crypto.sign.Ed25519.KeyPair,
+};
+
+fn signRoleDocumentMulti(
+    allocator: std.mem.Allocator,
+    signed_json: []const u8,
+    signers: []const Signer,
+) ![]u8 {
+    if (signers.len == 0) return error.EmptySignatures;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, signed_json, .{});
+    defer parsed.deinit();
+    const canonical_signed = try canonicalizeJsonValueAlloc(allocator, parsed.value);
+    defer allocator.free(canonical_signed);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var out_writer = out.writer(allocator);
+    var out_buf: [2048]u8 = undefined;
+    var out_adapter = out_writer.adaptToNewApi(&out_buf);
+    const writer = &out_adapter.new_interface;
+
+    try writer.writeAll("{\"signed\":");
+    try writer.writeAll(signed_json);
+    try writer.writeAll(",\"signatures\":[");
+    for (signers, 0..) |signer, idx| {
+        if (idx != 0) try writer.writeAll(",");
+        const signature = try signer.key_pair.sign(canonical_signed, null);
+        const sig_hex = std.fmt.bytesToHex(signature.toBytes(), .lower);
+        try writer.writeAll("{\"keyid\":");
+        try std.json.Stringify.encodeJsonString(signer.keyid, .{}, writer);
+        try writer.writeAll(",\"sig\":");
+        try std.json.Stringify.encodeJsonString(sig_hex[0..], .{}, writer);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]}");
+    try writer.flush();
+    return out.toOwnedSlice(allocator);
 }

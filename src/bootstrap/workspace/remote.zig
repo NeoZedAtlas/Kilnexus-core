@@ -35,6 +35,12 @@ const HttpStatusError = error{
     Unexpected,
 };
 
+const ExtractLimits = struct {
+    max_files: usize,
+    max_total_bytes: u64,
+    max_file_bytes: u64,
+};
+
 pub fn prepareRemoteInputs(
     allocator: std.mem.Allocator,
     workspace_spec: *const validator.WorkspaceSpec,
@@ -268,7 +274,11 @@ fn ensureRemoteExtractedTree(
     try std.fs.cwd().makePath(staging_path);
     errdefer std.fs.cwd().deleteTree(staging_path) catch {};
 
-    try extractBlobToDirectory(blob_path, staging_path);
+    try extractBlobToDirectory(blob_path, staging_path, .{
+        .max_files = options.remote_extract_max_files,
+        .max_total_bytes = options.remote_extract_max_total_bytes,
+        .max_file_bytes = options.remote_extract_max_file_bytes,
+    });
     const computed_root = try tree_hash.computeTreeRootForDir(allocator, staging_path);
     if (!std.mem.eql(u8, &computed_root, &expected_tree_root)) {
         return error.TreeRootMismatch;
@@ -287,7 +297,7 @@ fn ensureRemoteExtractedTree(
     try makeReadOnlyRecursively(allocator, tree_path);
 }
 
-fn extractBlobToDirectory(blob_path: []const u8, output_dir: []const u8) !void {
+fn extractBlobToDirectory(blob_path: []const u8, output_dir: []const u8, limits: ExtractLimits) !void {
     var blob_file = try std.fs.cwd().openFile(blob_path, .{});
     defer blob_file.close();
     const format = try detectBlobFormat(&blob_file);
@@ -297,24 +307,26 @@ fn extractBlobToDirectory(blob_path: []const u8, output_dir: []const u8) !void {
     defer out_dir.close();
 
     switch (format) {
-        .zip => {
-            var read_buffer: [64 * 1024]u8 = undefined;
-            var file_reader = blob_file.reader(&read_buffer);
-            try std.zip.extract(out_dir, &file_reader, .{});
-        },
+        .zip => return error.NotImplemented,
         .tar => {
             var read_buffer: [64 * 1024]u8 = undefined;
             var file_reader = blob_file.reader(&read_buffer);
-            try extractTarArchive(&out_dir, &file_reader.interface);
+            try extractTarArchive(&out_dir, &file_reader.interface, limits);
         },
         .tar_gzip => {
             var read_buffer: [64 * 1024]u8 = undefined;
             var file_reader = blob_file.reader(&read_buffer);
             var window: [std.compress.flate.max_window_len]u8 = undefined;
             var decompress = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &window);
-            try extractTarArchive(&out_dir, &decompress.reader);
+            try extractTarArchive(&out_dir, &decompress.reader, limits);
         },
         .raw => {
+            if (limits.max_files == 0) return error.NoSpaceLeft;
+            const stat = try blob_file.stat();
+            if (stat.kind != .file) return error.NotFile;
+            if (stat.size > limits.max_file_bytes) return error.NoSpaceLeft;
+            if (stat.size > limits.max_total_bytes) return error.NoSpaceLeft;
+
             var source_buffer: [64 * 1024]u8 = undefined;
             var source_reader = blob_file.reader(&source_buffer);
             var output = try out_dir.createFile("blob.bin", .{
@@ -350,7 +362,7 @@ fn isTarHeader(bytes: []const u8) bool {
     return std.mem.eql(u8, bytes[257..262], "ustar");
 }
 
-fn extractTarArchive(dir: *std.fs.Dir, reader: *std.Io.Reader) !void {
+fn extractTarArchive(dir: *std.fs.Dir, reader: *std.Io.Reader, limits: ExtractLimits) !void {
     var file_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var link_name_buffer: [std.fs.max_path_bytes]u8 = undefined;
     var file_contents_buffer: [8 * 1024]u8 = undefined;
@@ -359,6 +371,8 @@ fn extractTarArchive(dir: *std.fs.Dir, reader: *std.Io.Reader) !void {
         .link_name_buffer = &link_name_buffer,
     });
 
+    var file_count: usize = 0;
+    var total_bytes: u64 = 0;
     while (try it.next()) |entry| {
         try validateArchivePath(entry.name);
 
@@ -370,6 +384,12 @@ fn extractTarArchive(dir: *std.fs.Dir, reader: *std.Io.Reader) !void {
             },
             .sym_link => return error.SymlinkPolicyViolation,
             .file => {
+                file_count += 1;
+                if (file_count > limits.max_files) return error.NoSpaceLeft;
+                if (entry.size > limits.max_file_bytes) return error.NoSpaceLeft;
+                total_bytes = std.math.add(u64, total_bytes, entry.size) catch return error.NoSpaceLeft;
+                if (total_bytes > limits.max_total_bytes) return error.NoSpaceLeft;
+
                 var output = try createDirAndFileSafe(dir.*, entry.name, tarFileMode(entry.mode));
                 defer output.close();
                 var writer = output.writer(&file_contents_buffer);

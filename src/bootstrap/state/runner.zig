@@ -182,6 +182,13 @@ pub fn runWithOptionsCore(allocator: std.mem.Allocator, source: []const u8, opti
     try push(&trace, allocator, .execute_build_graph);
     var workspace_plan = workspace_api.planWorkspace(allocator, &workspace_spec, .{
         .cache_root = options.cache_root,
+        .remote_download_attempts = options.remote_download_attempts,
+        .remote_download_timeout_ms = options.remote_download_timeout_ms,
+        .remote_download_max_bytes = options.remote_download_max_bytes,
+        .remote_extract_max_files = options.remote_extract_max_files,
+        .remote_extract_max_total_bytes = options.remote_extract_max_total_bytes,
+        .remote_extract_max_file_bytes = options.remote_extract_max_file_bytes,
+        .allow_insecure_http_source = options.allow_insecure_http_source,
     }) catch |err| {
         failed_at.* = .execute_build_graph;
         push(&trace, allocator, .failed) catch {};

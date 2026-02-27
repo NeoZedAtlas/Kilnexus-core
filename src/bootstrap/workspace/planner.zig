@@ -335,6 +335,70 @@ test "planWorkspace rejects remote extract when tree_root mismatches" {
     }));
 }
 
+test "planWorkspace enforces remote extract byte limits" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var tar_writer: std.tar.Writer = .{
+        .underlying_writer = &out.writer,
+    };
+    try tar_writer.writeFileBytes("pkg/a.txt", "from-archive-limit\n", .{});
+    try tar_writer.finishPedantically();
+    const tar_bytes = try out.toOwnedSlice();
+    defer allocator.free(tar_bytes);
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "remote.tar",
+        .data = tar_bytes,
+    });
+
+    const sub = tmp.sub_path[0..];
+    const remote_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/remote.tar", .{sub});
+    defer allocator.free(remote_rel);
+    const remote_url = try std.fmt.allocPrint(allocator, "file://{s}", .{remote_rel});
+    defer allocator.free(remote_url);
+    const cache_root = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cache", .{sub});
+    defer allocator.free(cache_root);
+    const digest = try tree_hash.hashFileAtPath(remote_rel);
+    try tmp.dir.makePath("expected/pkg");
+    try tmp.dir.writeFile(.{
+        .sub_path = "expected/pkg/a.txt",
+        .data = "from-archive-limit\n",
+    });
+    const expected_tree_rel = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/expected", .{sub});
+    defer allocator.free(expected_tree_rel);
+    const expected_tree_root = try tree_hash.computeTreeRootForDir(allocator, expected_tree_rel);
+
+    var mounts = try allocator.alloc(validator.WorkspaceMountSpec, 1);
+    mounts[0] = .{
+        .source = try allocator.dupe(u8, "remote-src/pkg/a.txt"),
+        .target = try allocator.dupe(u8, "src/a.txt"),
+        .mode = 0o444,
+    };
+    var remotes = try allocator.alloc(validator.RemoteInputSpec, 1);
+    remotes[0] = .{
+        .id = try allocator.dupe(u8, "remote-src"),
+        .url = try allocator.dupe(u8, remote_url),
+        .blob_sha256 = digest.digest,
+        .tree_root = expected_tree_root,
+        .extract = true,
+    };
+    var spec: validator.WorkspaceSpec = .{
+        .entries = try allocator.alloc(validator.WorkspaceEntry, 0),
+        .remote_inputs = remotes,
+        .mounts = mounts,
+    };
+    defer spec.deinit(allocator);
+
+    try std.testing.expectError(error.NoSpaceLeft, planWorkspace(allocator, &spec, .{
+        .cache_root = cache_root,
+        .remote_extract_max_total_bytes = 8,
+    }));
+}
+
 test "planWorkspace applies strip_prefix for local directory mount projection" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
